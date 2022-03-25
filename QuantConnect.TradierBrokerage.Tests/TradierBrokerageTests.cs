@@ -172,10 +172,8 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Brokerage.Message += messageHandler;
 
             var symbol = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
-            var order = new MarketOrder(symbol, 1, DateTime.Now)
-            {
-                BrokerId = new List<string> { "9999999999999999" }
-            };
+            var order = new MarketOrder(symbol, 1, DateTime.Now);
+            order.BrokerId.Add("9999999999999999");
 
             Brokerage.CancelOrder(order);
 
