@@ -962,7 +962,6 @@ namespace QuantConnect.Brokerages.Tradier
                 Log.Trace($"TradierBrokerage.TradierPlaceOrder(): order submitted successfully: {response.Order.Id}");
 
                 // send the submitted event
-                order.QCOrder.PriceCurrency = Currencies.USD;
                 OnOrderEvent(new OrderEvent(order.QCOrder, DateTime.UtcNow, OrderFee.Zero) { Status = OrderStatus.Submitted });
 
                 // mark this in our open orders before we submit so it's gauranteed to be there when we poll for updates
@@ -1206,7 +1205,6 @@ namespace QuantConnect.Brokerages.Tradier
                     throw new Exception($"Lean order not found for brokerage id: {updatedOrder.Id}");
                 }
 
-                qcOrder.PriceCurrency = Currencies.USD;
                 var orderFee = OrderFee.Zero;
                 var fill = new OrderEvent(qcOrder, DateTime.UtcNow, orderFee, "Tradier Fill Event")
                 {
