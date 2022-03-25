@@ -1381,22 +1381,27 @@ namespace QuantConnect.Brokerages.Tradier
         protected Order ConvertOrder(TradierOrder order)
         {
             Order qcOrder;
+
+            var symbol = _symbolMapper.GetLeanSymbol(order.Class == TradierOrderClass.Option ? order.OptionSymbol : order.Symbol);
+            var quantity = ConvertQuantity(order);
+            var time = order.TransactionDate;
+
             switch (order.Type)
             {
                 case TradierOrderType.Limit:
-                    qcOrder = new LimitOrder { LimitPrice = order.Price };
+                    qcOrder = new LimitOrder(symbol, quantity, order.Price, time);
                     break;
 
                 case TradierOrderType.Market:
-                    qcOrder = new MarketOrder();
+                    qcOrder = new MarketOrder(symbol, quantity, time);
                     break;
 
                 case TradierOrderType.StopMarket:
-                    qcOrder = new StopMarketOrder { StopPrice = GetOrder(order.Id).StopPrice };
+                    qcOrder = new StopMarketOrder(symbol, quantity, GetOrder(order.Id).StopPrice, time);
                     break;
 
                 case TradierOrderType.StopLimit:
-                    qcOrder = new StopLimitOrder { LimitPrice = order.Price, StopPrice = GetOrder(order.Id).StopPrice };
+                    qcOrder = new StopLimitOrder(symbol, quantity, GetOrder(order.Id).StopPrice, order.Price, time);
                     break;
 
                 //case TradierOrderType.Credit:
@@ -1406,9 +1411,6 @@ namespace QuantConnect.Brokerages.Tradier
                     throw new NotImplementedException("The Tradier order type " + order.Type + " is not implemented.");
             }
 
-            qcOrder.Symbol = _symbolMapper.GetLeanSymbol(order.Class == TradierOrderClass.Option ? order.OptionSymbol : order.Symbol);
-
-            qcOrder.Quantity = ConvertQuantity(order);
             qcOrder.Status = ConvertStatus(order.Status);
             qcOrder.BrokerId.Add(order.Id.ToStringInvariant());
             //qcOrder.ContingentId =
@@ -1418,7 +1420,6 @@ namespace QuantConnect.Brokerages.Tradier
             {
                 qcOrder.Id = orderByBrokerageId.Id;
             }
-            qcOrder.Time = order.TransactionDate;
             return qcOrder;
         }
 
