@@ -21,6 +21,7 @@ using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Logging;
 using QuantConnect.Securities;
+using QuantConnect.Util;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
@@ -28,6 +29,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
     public class TradierBrokerageHistoryProviderTests
     {
         private bool _useSandbox = Config.GetBool("tradier-use-sandbox");
+        private string _environment = Config.Get("tradier-environment");
         private string _accountId = Config.Get("tradier-account-id");
         private string _accessToken = Config.Get("tradier-access-token");
 
@@ -60,7 +62,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         public void GetsHistory(Symbol symbol, Resolution resolution, TimeSpan period, bool throwsException)
         {
             TestDelegate test = () =>
-            {   
+            {
                 var now = DateTime.UtcNow;
                 var request = new HistoryRequest(now.Add(-period),
                     now,
@@ -88,22 +90,24 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 Assert.DoesNotThrow(test);
             }
         }
-    
+
         [TestCase(Resolution.Daily)]
         [TestCase(Resolution.Hour)]
         [TestCase(Resolution.Minute)]
         [TestCase(Resolution.Second)]
         [TestCase(Resolution.Tick)]
-        public void GetsOptionHistory(Resolution resolution){
+        public void GetsOptionHistory(Resolution resolution)
+        {
             TestDelegate test = () =>
-            { 
+            {
                 var spy = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
                 var option = Symbol.CreateOption(spy, Market.USA, OptionStyle.American, OptionRight.Put, 440m, new DateTime(2021, 09, 10));
 
                 var start = new DateTime(2021, 8, 25);
                 DateTime end;
 
-                switch(resolution){
+                switch (resolution)
+                {
                     case Resolution.Daily:
                         end = new DateTime(2021, 9, 3);
                         break;
@@ -133,11 +137,17 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
                 GetHistoryHelper(request, resolution);
             };
-            
+
             Assert.DoesNotThrow(test);
         }
 
-        private void GetHistoryHelper(HistoryRequest request, Resolution resolution){
+        private void GetHistoryHelper(HistoryRequest request, Resolution resolution)
+        {
+
+            if (!string.IsNullOrEmpty(_environment))
+            {
+                _useSandbox = _environment.ToLowerInvariant() == "paper";
+            }
 
             var brokerage = new TradierBrokerage(null, null, null, null, _useSandbox, _accountId, _accessToken);
             var requests = new[] { request };
@@ -161,6 +171,6 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             }
 
             Log.Trace("Data points retrieved: " + brokerage.DataPointCount);
-        }   
+        }
     }
 }
