@@ -25,7 +25,6 @@ using QuantConnect.Util;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
-    [TestFixture, Explicit("This test requires a configured and active Tradier account")]
     public class TradierBrokerageHistoryProviderTests
     {
         private bool _useSandbox = Config.GetBool("tradier-use-sandbox");

@@ -28,7 +28,6 @@ using QuantConnect.Securities;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
-    [TestFixture, Explicit("This test requires a configured and active Tradier account")]
     public class TradierBrokerageTests : BrokerageTests
     {
         /// <summary>
@@ -52,6 +51,11 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         protected override IBrokerage CreateBrokerage(IOrderProvider orderProvider, ISecurityProvider securityProvider)
         {
             var useSandbox = TradierBrokerageFactory.Configuration.UseSandbox;
+            var environment = TradierBrokerageFactory.Configuration.Environment;
+            if (!string.IsNullOrEmpty(environment))
+            {
+                useSandbox = environment.ToLowerInvariant() == "paper";
+            }
             var accountId = TradierBrokerageFactory.Configuration.AccountId;
             var accessToken = TradierBrokerageFactory.Configuration.AccessToken;
 
