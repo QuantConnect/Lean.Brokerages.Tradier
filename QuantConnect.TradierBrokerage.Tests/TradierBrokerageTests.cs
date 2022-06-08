@@ -158,7 +158,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Brokerage.Message += messageHandler;
 
             var symbol = Symbol.Create("XYZ", SecurityType.Equity, Market.USA);
-            PlaceOrderWaitForStatus(new MarketOrder(symbol, -1, DateTime.Now), OrderStatus.Invalid, allowFailedSubmission: true);
+            PlaceOrderWaitForStatus(new MarketOrder(symbol, 1, DateTime.Now), OrderStatus.Invalid, allowFailedSubmission: true);
 
             Brokerage.Message -= messageHandler;
 
