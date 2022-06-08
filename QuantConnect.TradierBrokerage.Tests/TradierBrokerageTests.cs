@@ -45,6 +45,23 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         }
 
         /// <summary>
+        /// Provides the data required to test each order type in various cases
+        /// Good Till Orders are not allowed when shorting
+        /// </summary>
+        private static TestCaseData[] ShortOrderParameters()
+        {
+            var orderProperties = new OrderProperties();
+            orderProperties.TimeInForce = TimeInForce.Day;
+            return new[]
+            {
+                new TestCaseData(new MarketOrderTestParameters(Symbols.AAPL, properties: orderProperties)).SetName("MarketOrder"),
+                new TestCaseData(new LimitOrderTestParameters(Symbols.AAPL, 1000m, 0.01m, properties: orderProperties)).SetName("LimitOrder"),
+                new TestCaseData(new StopMarketOrderTestParameters(Symbols.AAPL, 1000m, 0.01m, properties: orderProperties)).SetName("StopMarketOrder"),
+                new TestCaseData(new StopLimitOrderTestParameters(Symbols.AAPL, 1000m, 0.01m, properties: orderProperties)).SetName("StopLimitOrder")
+            };
+        }
+
+        /// <summary>
         /// Creates the brokerage under test
         /// </summary>
         /// <returns>A connected brokerage instance</returns>
@@ -158,7 +175,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Brokerage.Message += messageHandler;
 
             var symbol = Symbol.Create("XYZ", SecurityType.Equity, Market.USA);
-            PlaceOrderWaitForStatus(new MarketOrder(symbol, 1, DateTime.Now), OrderStatus.Invalid, allowFailedSubmission: true);
+            var orderProperties = new OrderProperties();
+            orderProperties.TimeInForce = TimeInForce.Day;
+            PlaceOrderWaitForStatus(new MarketOrder(symbol, -1, DateTime.Now, properties: orderProperties), OrderStatus.Invalid, allowFailedSubmission: true);
 
             Brokerage.Message -= messageHandler;
 
@@ -266,25 +285,25 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             base.CloseFromLong(parameters);
         }
 
-        [Test, TestCaseSource(nameof(OrderParameters))]
+        [Test, TestCaseSource(nameof(ShortOrderParameters))]
         public override void ShortFromZero(OrderTestParameters parameters)
         {
             base.ShortFromZero(parameters);
         }
 
-        [Test, TestCaseSource(nameof(OrderParameters))]
+        [Test, TestCaseSource(nameof(ShortOrderParameters))]
         public override void CloseFromShort(OrderTestParameters parameters)
         {
             base.CloseFromShort(parameters);
         }
 
-        [Test, TestCaseSource(nameof(OrderParameters))]
+        [Test, TestCaseSource(nameof(ShortOrderParameters))]
         public override void ShortFromLong(OrderTestParameters parameters)
         {
             base.ShortFromLong(parameters);
         }
 
-        [Test, TestCaseSource(nameof(OrderParameters))]
+        [Test, TestCaseSource(nameof(ShortOrderParameters))]
         public override void LongFromShort(OrderTestParameters parameters)
         {
             base.LongFromShort(parameters);
