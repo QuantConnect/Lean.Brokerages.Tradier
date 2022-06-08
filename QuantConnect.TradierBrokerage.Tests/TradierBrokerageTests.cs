@@ -162,9 +162,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             Brokerage.Message -= messageHandler;
 
-            // Raw response: "An error occurred while communicating with the backend."
+            // Raw response: "Order 1: Undefined symbol: XYZ."
 
-            Assert.AreEqual("An error occurred while communicating with the backend.", message);
+            Assert.AreEqual("Order 1: Undefined symbol: XYZ", message);
         }
 
         [Test]
