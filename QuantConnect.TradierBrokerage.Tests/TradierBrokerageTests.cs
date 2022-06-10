@@ -159,9 +159,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             Brokerage.Message -= messageHandler;
 
-            // Raw response: {"errors":{"error":["Backoffice rejected override of the order.","InitialMargin"]}}
+            // Raw response: {"errors":{"error":["Backoffice rejected override of the order.","DayTradingBuyingPowerExceeded"]}}
 
-            Assert.That(message.Contains("InitialMargin", StringComparison.InvariantCulture));
+            Assert.That(message.Contains("DayTradingBuyingPowerExceeded", StringComparison.InvariantCulture));
             Assert.That(message.Contains("Backoffice rejected override of the order", StringComparison.InvariantCulture));
         }
 
