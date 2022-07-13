@@ -30,6 +30,7 @@ namespace QuantConnect.Brokerages.Tradier
     /// </summary>
     public partial class TradierBrokerage
     {
+        private bool _loggedTradierSupportsOnlyTradeBars;
         #region IHistoryProvider implementation
 
         /// <summary>
@@ -99,8 +100,13 @@ namespace QuantConnect.Brokerages.Tradier
 
                 if (request.DataType == typeof(QuoteBar))
                 {
-                    Log.Error("TradierBrokerage.GetHistory(): Tradier only supports TradeBars");
-                    yield break;
+                    if (!_loggedTradierSupportsOnlyTradeBars)
+                    {
+                        _loggedTradierSupportsOnlyTradeBars = true;
+                        _algorithm?.Debug("Warning: Tradier history provider only supports trade information, does not support quotes.");
+                        Log.Error("TradierBrokerage.GetHistory(): Tradier only supports TradeBars");
+                    }
+                    continue;
                 }
 
                 var start = request.StartTimeUtc.ConvertTo(DateTimeZone.Utc, TimeZones.NewYork);

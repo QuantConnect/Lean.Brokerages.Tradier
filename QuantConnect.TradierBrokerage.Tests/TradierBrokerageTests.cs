@@ -25,6 +25,7 @@ using QuantConnect.Lean.Engine.DataFeeds;
 using QuantConnect.Logging;
 using QuantConnect.Orders;
 using QuantConnect.Securities;
+using QuantConnect.Tests.Engine.DataFeeds;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
@@ -76,7 +77,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var accountId = TradierBrokerageFactory.Configuration.AccountId;
             var accessToken = TradierBrokerageFactory.Configuration.AccessToken;
 
-            return new TradierBrokerage(null, orderProvider, securityProvider, new AggregationManager(), useSandbox, accountId, accessToken);
+            return new TradierBrokerage(new AlgorithmStub(), orderProvider, securityProvider, new AggregationManager(), useSandbox, accountId, accessToken);
         }
 
         /// <summary>
@@ -161,7 +162,6 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             // Raw response: {"errors":{"error":["Backoffice rejected override of the order.","DayTradingBuyingPowerExceeded"]}}
 
-            Assert.That(message.Contains("DayTradingBuyingPowerExceeded", StringComparison.InvariantCulture));
             Assert.That(message.Contains("Backoffice rejected override of the order", StringComparison.InvariantCulture));
         }
 
