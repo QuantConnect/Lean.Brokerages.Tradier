@@ -21,6 +21,7 @@ using QuantConnect.Configuration;
 using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Packets;
+using QuantConnect.TradierBrokerage;
 using QuantConnect.Util;
 using RestSharp;
 using System;
@@ -261,7 +262,7 @@ namespace QuantConnect.Brokerages.Tradier
         /// </summary>
         private TradierStreamSession GetStreamSession()
         {
-            if (_streamSession == null)
+            if (_streamSession == null || !_streamSession.IsValid)
             {
                 var request = new RestRequest("markets/events/session", Method.POST);
                 _streamSession = Execute<TradierStreamSession>(request, TradierApiRequestType.Data, "stream");
