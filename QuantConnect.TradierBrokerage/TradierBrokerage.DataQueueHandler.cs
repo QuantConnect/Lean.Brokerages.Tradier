@@ -21,7 +21,6 @@ using QuantConnect.Configuration;
 using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Packets;
-using QuantConnect.TradierBrokerage;
 using QuantConnect.Util;
 using RestSharp;
 using System;

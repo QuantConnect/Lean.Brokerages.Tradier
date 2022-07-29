@@ -16,7 +16,7 @@
 
 using System;
 
-namespace QuantConnect.TradierBrokerage
+namespace QuantConnect.Brokerages.Tradier
 {
     /// <summary>
     /// Create a new stream session
