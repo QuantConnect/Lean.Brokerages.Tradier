@@ -397,17 +397,6 @@ namespace QuantConnect.Brokerages.Tradier
     }
 
     /// <summary>
-    /// Create a new stream session
-    /// </summary>
-    public class TradierStreamSession
-    {
-        /// Trading Stream: Session Id
-        public string SessionId;
-        /// Trading Stream: Stream URL
-        public string Url;
-    }
-
-    /// <summary>
     /// One data packet from a tradier stream:
     /// </summary>
     public class TradierStreamData

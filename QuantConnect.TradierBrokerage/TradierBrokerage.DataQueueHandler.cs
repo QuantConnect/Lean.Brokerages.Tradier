@@ -261,7 +261,7 @@ namespace QuantConnect.Brokerages.Tradier
         /// </summary>
         private TradierStreamSession GetStreamSession()
         {
-            if (_streamSession == null)
+            if (_streamSession == null || !_streamSession.IsValid)
             {
                 var request = new RestRequest("markets/events/session", Method.POST);
                 _streamSession = Execute<TradierStreamSession>(request, TradierApiRequestType.Data, "stream");
