@@ -63,6 +63,7 @@ namespace QuantConnect.Brokerages.Tradier
                     _algorithm?.Debug("Warning: Tradier history provider only supports trade information, does not support quotes.");
                     Log.Error("TradierBrokerage.GetHistory(): Tradier only supports TradeBars");
                 }
+                yield break;
             }
 
             var start = request.StartTimeUtc.ConvertTo(DateTimeZone.Utc, TimeZones.NewYork);
