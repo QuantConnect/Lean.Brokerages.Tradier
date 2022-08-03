@@ -53,7 +53,7 @@ namespace QuantConnect.Brokerages.Tradier
     ///  - Getting user data.
     /// </summary>
     [BrokerageFactory(typeof(TradierBrokerageFactory))]
-    public partial class TradierBrokerage : BaseWebsocketsBrokerage, IDataQueueHandler, IDataQueueUniverseProvider, IHistoryProvider
+    public partial class TradierBrokerage : BaseWebsocketsBrokerage, IDataQueueHandler, IDataQueueUniverseProvider
     {
         private bool _useSandbox;
         private string _accountId;
@@ -211,9 +211,19 @@ namespace QuantConnect.Brokerages.Tradier
 
                 try
                 {
-                    response = !string.IsNullOrEmpty(rootName)
-                        ? DeserializeRemoveRoot<T>(raw.Content, rootName)
-                        : JsonConvert.DeserializeObject<T>(raw.Content);
+                    if (!string.IsNullOrEmpty(rootName))
+                    {
+                        if (TryDeserializeRemoveRoot(raw.Content, rootName, out response))
+                        {
+                            // if we are able to successfully deserialize the rootName, even if null, return it. For example if there is no historical data
+                            // tradier will just return success response with null value in 'rootName' and we don't want to retry & sleep because of it
+                            return response;
+                        }
+                    }
+                    else
+                    {
+                        response = JsonConvert.DeserializeObject<T>(raw.Content);
+                    }
                 }
                 catch (Exception e)
                 {
@@ -477,13 +487,13 @@ namespace QuantConnect.Brokerages.Tradier
 
             var dataContainer = Execute<TradierQuoteContainer>(request, TradierApiRequestType.Data, "quotes");
             // can return null quotes and not really be failing for cases where the provided symbols do not match
-            return dataContainer.Quotes ?? new List<TradierQuote>();
+            return dataContainer?.Quotes ?? new List<TradierQuote>();
         }
 
         /// <summary>
         /// Get the historical bars for this period
         /// </summary>
-        public List<TradierTimeSeries> GetTimeSeries(Symbol symbol, DateTime start, DateTime end, TradierTimeSeriesIntervals interval)
+        private List<TradierTimeSeries> GetTimeSeries(Symbol symbol, DateTime start, DateTime end, TradierTimeSeriesIntervals interval)
         {
             // Create and send request
             var ticker = _symbolMapper.GetBrokerageSymbol(symbol);
@@ -493,13 +503,15 @@ namespace QuantConnect.Brokerages.Tradier
             request.AddParameter("start", start.ToStringInvariant("yyyy-MM-dd HH:mm"), ParameterType.QueryString);
             request.AddParameter("end", end.ToStringInvariant("yyyy-MM-dd HH:mm"), ParameterType.QueryString);
             var dataContainer = Execute<TradierTimeSeriesContainer>(request, TradierApiRequestType.Data, "series");
-            return dataContainer.TimeSeries;
+
+            // there could be no data the requested symbol and time, tradier will return null
+            return dataContainer?.TimeSeries ?? new List<TradierTimeSeries>();
         }
 
         /// <summary>
         /// Get full daily, weekly or monthly bars of historical periods:
         /// </summary>
-        public List<TradierHistoryBar> GetHistoricalData(Symbol symbol,
+        private List<TradierHistoryBar> GetHistoricalData(Symbol symbol,
             DateTime start,
             DateTime end,
             TradierHistoricalDataIntervals interval = TradierHistoricalDataIntervals.Daily)
@@ -512,7 +524,9 @@ namespace QuantConnect.Brokerages.Tradier
             request.AddParameter("end", end.ToStringInvariant("yyyy-MM-dd"), ParameterType.QueryString);
             request.AddParameter("interval", GetEnumDescription(interval));
             var dataContainer = Execute<TradierHistoryDataContainer>(request, TradierApiRequestType.Data, "history");
-            return dataContainer.Data;
+
+            // there could be no data the requested symbol and time, tradier will return null
+            return dataContainer?.Data ?? new List<TradierHistoryBar>();
         }
 
         /// <summary>
@@ -582,22 +596,26 @@ namespace QuantConnect.Brokerages.Tradier
         /// <summary>
         /// Get the rype inside the nested root:
         /// </summary>
-        private T DeserializeRemoveRoot<T>(string json, string rootName)
+        private bool TryDeserializeRemoveRoot<T>(string json, string rootName, out T obj)
         {
-            var obj = default(T);
+            obj = default;
+            var success = false;
 
             try
             {
                 //Dynamic deserialization:
                 dynamic dynDeserialized = JsonConvert.DeserializeObject(json);
                 obj = JsonConvert.DeserializeObject<T>(dynDeserialized[rootName].ToString());
+
+                // if we arrieved here without exploding it's a success even if obj is null, because that's what we got back
+                success = true;
             }
             catch (Exception err)
             {
                 Log.Error(err, "RootName: " + rootName);
             }
 
-            return obj;
+            return success;
         }
 
         #endregion Tradier client implementation

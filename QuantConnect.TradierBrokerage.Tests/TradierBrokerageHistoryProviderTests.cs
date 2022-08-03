@@ -14,162 +14,206 @@
 */
 
 using System;
+using System.Linq;
 using NUnit.Framework;
-using QuantConnect.Brokerages.Tradier;
-using QuantConnect.Configuration;
 using QuantConnect.Data;
-using QuantConnect.Data.Market;
 using QuantConnect.Logging;
 using QuantConnect.Securities;
-using QuantConnect.Util;
+using QuantConnect.Data.Market;
+using QuantConnect.Configuration;
+using QuantConnect.Brokerages.Tradier;
+using QuantConnect.Lean.Engine.DataFeeds;
+using QuantConnect.Securities.Option;
+using QuantConnect.Interfaces;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
+    [TestFixture]
     public class TradierBrokerageHistoryProviderTests
     {
+        private TradierBrokerage _brokerage;
+        private IOptionChainProvider _chainProvider;
         private bool _useSandbox = Config.GetBool("tradier-use-sandbox");
-        private string _environment = Config.Get("tradier-environment");
-        private string _accountId = Config.Get("tradier-account-id");
-        private string _accessToken = Config.Get("tradier-access-token");
+        private readonly string _environment = Config.Get("tradier-environment");
+        private readonly string _accountId = Config.Get("tradier-account-id");
+        private readonly string _accessToken = Config.Get("tradier-access-token");
 
         private static TestCaseData[] TestParameters
         {
             get
             {
+                var seasEquity = Symbol.Create("SEAS", SecurityType.Equity, Market.USA);
+                var seasOptionSymbol = Symbol.CreateOption(seasEquity, Market.USA, OptionStyle.American, OptionRight.Call, 50, new DateTime(2022, 8, 19));
+
                 return new[]
                 {
                     // valid parameters
-                    new TestCaseData(Symbols.AAPL, Resolution.Tick, Time.OneMinute, false),
-                    new TestCaseData(Symbols.AAPL, Resolution.Second, Time.OneMinute, false),
-                    new TestCaseData(Symbols.AAPL, Resolution.Minute, Time.OneHour, false),
-                    new TestCaseData(Symbols.AAPL, Resolution.Hour, Time.OneDay, false),
-                    new TestCaseData(Symbols.AAPL, Resolution.Daily, TimeSpan.FromDays(15), false),
+                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Second, false, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, 60 + 1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Hour, false, 7 * 2),
+                    new TestCaseData(Symbols.AAPL, Resolution.Daily, false, 6),
+
+                    new TestCaseData(seasOptionSymbol, Resolution.Daily, false, 0),
 
                     // invalid canonical symbo, throws "System.ArgumentException : Invalid symbol, cannot use canonical"
-                    new TestCaseData(Symbols.SPY_Option_Chain, Resolution.Daily, TimeSpan.FromDays(15), true),
-
-                    // invalid period, throws "System.ArgumentException : Invalid date range specified"
-                    new TestCaseData(Symbols.AAPL, Resolution.Daily, TimeSpan.FromDays(-15), true),
+                    new TestCaseData(Symbols.SPY_Option_Chain, Resolution.Daily, true, 0),
 
                     // invalid security type, throws "System.ArgumentException : Invalid security type: Forex"
-                    new TestCaseData(Symbols.EURUSD, Resolution.Daily, TimeSpan.FromDays(15), true)
+                    new TestCaseData(Symbols.EURUSD, Resolution.Daily, true, 0),
                 };
             }
         }
 
-        [Test, TestCaseSource(nameof(TestParameters))]
-        public void GetsHistory(Symbol symbol, Resolution resolution, TimeSpan period, bool throwsException)
+        [OneTimeSetUp]
+        public void Setup()
         {
-            TestDelegate test = () =>
-            {
-                var now = DateTime.UtcNow;
-                var request = new HistoryRequest(now.Add(-period),
-                    now,
-                    typeof(TradeBar),
-                    symbol,
-                    resolution,
-                    SecurityExchangeHours.AlwaysOpen(TimeZones.EasternStandard),
-                    TimeZones.EasternStandard,
-                    Resolution.Minute,
-                    false,
-                    false,
-                    DataNormalizationMode.Adjusted,
-                    TickType.Trade);
-
-
-                GetHistoryHelper(request, resolution);
-            };
-
-            if (throwsException)
-            {
-                Assert.Throws<ArgumentException>(test);
-            }
-            else
-            {
-                Assert.DoesNotThrow(test);
-            }
-        }
-
-        [TestCase(Resolution.Daily)]
-        [TestCase(Resolution.Hour)]
-        [TestCase(Resolution.Minute)]
-        [TestCase(Resolution.Second)]
-        [TestCase(Resolution.Tick)]
-        public void GetsOptionHistory(Resolution resolution)
-        {
-            TestDelegate test = () =>
-            {
-                var spy = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
-                var option = Symbol.CreateOption(spy, Market.USA, OptionStyle.American, OptionRight.Put, 440m, new DateTime(2021, 09, 10));
-
-                var start = new DateTime(2021, 8, 25);
-                DateTime end;
-
-                switch (resolution)
-                {
-                    case Resolution.Daily:
-                        end = new DateTime(2021, 9, 3);
-                        break;
-                    case Resolution.Hour:
-                        end = new DateTime(2021, 8, 26);
-                        break;
-                    case Resolution.Minute:
-                    case Resolution.Second:
-                    case Resolution.Tick:
-                    default:
-                        end = new DateTime(2021, 8, 25, 15, 0, 0);
-                        break;
-                }
-
-                var request = new HistoryRequest(start,
-                    end,
-                    typeof(TradeBar),
-                    option,
-                    resolution,
-                    SecurityExchangeHours.AlwaysOpen(TimeZones.EasternStandard),
-                    TimeZones.EasternStandard,
-                    Resolution.Minute,
-                    false,
-                    false,
-                    DataNormalizationMode.Adjusted,
-                    TickType.Trade);
-
-                GetHistoryHelper(request, resolution);
-            };
-
-            Assert.DoesNotThrow(test);
-        }
-
-        private void GetHistoryHelper(HistoryRequest request, Resolution resolution)
-        {
-
             if (!string.IsNullOrEmpty(_environment))
             {
                 _useSandbox = _environment.ToLowerInvariant() == "paper";
             }
 
-            var brokerage = new TradierBrokerage(null, null, null, null, _useSandbox, _accountId, _accessToken);
-            var requests = new[] { request };
-            var history = brokerage.GetHistory(requests, TimeZones.Utc);
+            _brokerage = new TradierBrokerage(null, null, null, null, _useSandbox, _accountId, _accessToken);
+            _chainProvider = new CachingOptionChainProvider(new LiveOptionChainProvider(TestGlobals.DataCacheProvider, TestGlobals.MapFileProvider));
+        }
 
-            foreach (var slice in history)
+        [OneTimeTearDown]
+        public void TearDown()
+        {
+            _brokerage.Disconnect();
+            _brokerage.Dispose();
+        }
+
+        [Test, TestCaseSource(nameof(TestParameters))]
+        public void GetsHistory(Symbol symbol, Resolution resolution, bool throwsException, int expectedCount)
+        {
+            if (_useSandbox && (resolution == Resolution.Tick || resolution == Resolution.Second))
             {
-                if (resolution == Resolution.Tick)
+                // sandbox doesn't allow tick data, we generate second resolution from tick
+                return;
+            }
+            var mhdb = MarketHoursDatabase.FromDataFolder().GetEntry(symbol.ID.Market, symbol, symbol.SecurityType);
+
+            GetStartEndTime(mhdb, resolution, expectedCount, out var startUtc, out var endUtc);
+
+            var request = new HistoryRequest(startUtc, endUtc, typeof(TradeBar), symbol, resolution, mhdb.ExchangeHours,
+                mhdb.DataTimeZone, null, false, false, DataNormalizationMode.Adjusted, TickType.Trade);
+
+            if (throwsException)
+            {
+                Assert.Throws<ArgumentException>(() => GetHistoryHelper(request));
+            }
+            else
+            {
+                var count = GetHistoryHelper(request);
+
+                if (request.Resolution == Resolution.Tick || request.Resolution == Resolution.Second)
                 {
-                    foreach (var tick in slice.Ticks[request.Symbol])
-                    {
-                        Log.Trace("{0}: {1} - {2} / {3}", tick.Time, tick.Symbol, tick.BidPrice, tick.AskPrice);
-                    }
+                    // more than 60 points
+                    Assert.Greater(count, 60, $"Symbol: {request.Symbol.Value}. Resolution {request.Resolution}");
                 }
                 else
                 {
-                    var bar = slice.Bars[request.Symbol];
-
-                    Log.Trace("{0}: {1} - O={2}, H={3}, L={4}, C={5}, V={6}", bar.Time, bar.Symbol, bar.Open, bar.High, bar.Low, bar.Close, bar.Volume);
+                    Assert.AreEqual(expectedCount, count, $"Symbol: {request.Symbol.Value}. Resolution {request.Resolution}");
                 }
             }
+        }
 
-            Log.Trace("Data points retrieved: " + brokerage.DataPointCount);
+        [TestCase(Resolution.Daily, 20)]
+        [TestCase(Resolution.Hour, 30)]
+        [TestCase(Resolution.Minute, 60 * 10)]
+        [TestCase(Resolution.Second, 60 * 10 * 5)]
+        [TestCase(Resolution.Tick, -1)]
+        public void GetsOptionHistory(Resolution resolution, int expectedCount)
+        {
+            if (_useSandbox && (resolution == Resolution.Tick || resolution == Resolution.Second))
+            {
+                // sandbox doesn't allow tick data, we generate second resolution from tick
+                return;
+            }
+            var spy = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
+            var mhdb = MarketHoursDatabase.FromDataFolder().GetEntry(spy.ID.Market, spy, spy.SecurityType);
+
+            GetStartEndTime(mhdb, resolution, expectedCount, out var startUtc, out var endUtc);
+
+            var chain = _chainProvider.GetOptionContractList(spy, startUtc.ConvertFromUtc(mhdb.ExchangeHours.TimeZone)).ToList();
+
+            var quote = _brokerage.GetQuotes(new() { "SPY" }).First().Last;
+            var option = chain.Where(x => x.ID.OptionRight == OptionRight.Call)
+                // drop weeklies
+                .Where(x => OptionSymbol.IsStandard(x))
+                // not expired
+                .Where(x => x.ID.Date >= endUtc.ConvertFromUtc(mhdb.ExchangeHours.TimeZone))
+                // closest to expire first
+                .OrderBy(x => x.ID.Date)
+                // most in the money
+                .ThenBy(x => x.ID.StrikePrice)
+                // but not too far in the money
+                .First(x => (x.ID.StrikePrice + quote * 0.01m) > quote);
+
+            var request = new HistoryRequest(startUtc,
+                endUtc,
+                typeof(TradeBar),
+                option,
+                resolution,
+                mhdb.ExchangeHours,
+                mhdb.DataTimeZone,
+                null,
+                false,
+                false,
+                DataNormalizationMode.Adjusted,
+                TickType.Trade);
+
+            var count = GetHistoryHelper(request);
+
+            // more than X points
+            Assert.Greater(count, 15, $"Symbol: {request.Symbol.Value}. Resolution {request.Resolution}");
+        }
+
+        private void GetStartEndTime(MarketHoursDatabase.Entry entry, Resolution resolution, int expectedCount, out DateTime startTimeUtc, out DateTime endTimeUtc)
+        {
+            if (resolution == Resolution.Tick || resolution == Resolution.Second)
+            {
+                // for tick ask for X minutes worth of data
+                expectedCount = 30;
+                resolution = Resolution.Minute;
+            }
+
+            // tradier returns data for the last few days, so we need to adjust start and end time here
+            endTimeUtc = DateTime.UtcNow.AddHours(-1);
+            var endLocalTime = endTimeUtc.ConvertFromUtc(entry.ExchangeHours.TimeZone);
+            var resolutionSpan = resolution.ToTimeSpan();
+
+            var localStartTime = Time.GetStartTimeForTradeBars(entry.ExchangeHours, endLocalTime, resolutionSpan, expectedCount, false, entry.DataTimeZone);
+            startTimeUtc = localStartTime.ConvertToUtc(entry.ExchangeHours.TimeZone);
+        }
+
+        private int GetHistoryHelper(HistoryRequest request)
+        {
+            var count = 0;
+            BaseData previous = null;
+            foreach (var data in _brokerage.GetHistory(request))
+            {
+                Assert.AreEqual(request.Resolution.ToTimeSpan(), data.EndTime - data.Time);
+
+                if (previous != null)
+                {
+                    if(request.Resolution == Resolution.Tick)
+                    {
+                        Assert.IsTrue(previous.EndTime <= data.EndTime);
+                    }
+                    else
+                    {
+                        Assert.IsTrue(previous.EndTime < data.EndTime);
+                    }
+                }
+                count++;
+                previous = data;
+
+                Log.Debug($"{data.EndTime}-{data.Time} {data}");
+            }
+
+            return count;
         }
     }
 }
