@@ -56,6 +56,8 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             // resets the version among other things
             Globals.Reset();
+
+            TestGlobals.Initialize();
         }
 
         private static void SetUp()
