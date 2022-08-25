@@ -25,6 +25,7 @@ using QuantConnect.Brokerages.Tradier;
 using QuantConnect.Lean.Engine.DataFeeds;
 using QuantConnect.Securities.Option;
 using QuantConnect.Interfaces;
+using QuantConnect.Util;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
@@ -48,19 +49,23 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 return new[]
                 {
                     // valid parameters
-                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false, -1),
-                    new TestCaseData(Symbols.AAPL, Resolution.Second, false, -1),
-                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, 60 + 1),
-                    new TestCaseData(Symbols.AAPL, Resolution.Hour, false, 7 * 2),
-                    new TestCaseData(Symbols.AAPL, Resolution.Daily, false, 6),
+                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false, -1, TickType.Trade),
+                    new TestCaseData(Symbols.AAPL, Resolution.Second, false, -1, TickType.Trade),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, 60 + 1, TickType.Trade),
+                    new TestCaseData(Symbols.AAPL, Resolution.Hour, false, 7 * 2, TickType.Trade),
+                    new TestCaseData(Symbols.AAPL, Resolution.Daily, false, 6, TickType.Trade),
 
-                    new TestCaseData(seasOptionSymbol, Resolution.Daily, false, 0),
+                    // invalid data type, returns empty response
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, 0, TickType.Quote),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, 0, TickType.OpenInterest),
+
+                    new TestCaseData(seasOptionSymbol, Resolution.Daily, false, 0, TickType.Trade),
 
                     // invalid canonical symbo, throws "System.ArgumentException : Invalid symbol, cannot use canonical"
-                    new TestCaseData(Symbols.SPY_Option_Chain, Resolution.Daily, true, 0),
+                    new TestCaseData(Symbols.SPY_Option_Chain, Resolution.Daily, true, 0, TickType.Trade),
 
                     // invalid security type, throws "System.ArgumentException : Invalid security type: Forex"
-                    new TestCaseData(Symbols.EURUSD, Resolution.Daily, true, 0),
+                    new TestCaseData(Symbols.EURUSD, Resolution.Daily, true, 0, TickType.Trade),
                 };
             }
         }
@@ -85,7 +90,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         }
 
         [Test, TestCaseSource(nameof(TestParameters))]
-        public void GetsHistory(Symbol symbol, Resolution resolution, bool throwsException, int expectedCount)
+        public void GetsHistory(Symbol symbol, Resolution resolution, bool throwsException, int expectedCount, TickType tickType)
         {
             if (_useSandbox && (resolution == Resolution.Tick || resolution == Resolution.Second))
             {
@@ -96,8 +101,8 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             GetStartEndTime(mhdb, resolution, expectedCount, out var startUtc, out var endUtc);
 
-            var request = new HistoryRequest(startUtc, endUtc, typeof(TradeBar), symbol, resolution, mhdb.ExchangeHours,
-                mhdb.DataTimeZone, null, false, false, DataNormalizationMode.Adjusted, TickType.Trade);
+            var request = new HistoryRequest(startUtc, endUtc, LeanData.GetDataType(resolution, tickType), symbol, resolution, mhdb.ExchangeHours,
+                mhdb.DataTimeZone, null, false, false, DataNormalizationMode.Adjusted, tickType);
 
             if (throwsException)
             {
