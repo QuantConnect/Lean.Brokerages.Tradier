@@ -55,7 +55,7 @@ namespace QuantConnect.Brokerages.Tradier
                 throw new ArgumentException("Invalid symbol, cannot use canonical symbols for history request");
             }
 
-            if (request.DataType == typeof(QuoteBar))
+            if (request.TickType != TickType.Trade)
             {
                 if (!_loggedTradierSupportsOnlyTradeBars)
                 {
