@@ -15,6 +15,8 @@ This repository hosts the Tradier Brokerage Plugin Integration with the QuantCon
 
 Tradier was founded by Dan Raju, Peter Laptewicz, Jason Barry, Jeyashree Chidambaram, and Steve Agalloco in 2012 with the goal to "deliver a choice of low-cost, high-value brokerage services to traders". Tradier provides access to trading Equities and Options for clients in over 250 countries and territories with [no minimum deposit for cash accounts](https://brokerage.tradier.com/support). Tradier also delivers custody, clearing, execution, and billing on behalf of registered advisors.
 
+For more information about the Tradier brokerage, see  the [QuantConnect-Tradier Integration Page](https://www.quantconnect.com/docs/v2/our-platform/live-trading/brokerages/tradier). 
+
 ## Using the Brokerage Plugin
   
 ### Deploying Tradier with VSCode User Interace
