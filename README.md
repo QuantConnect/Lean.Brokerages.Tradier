@@ -31,6 +31,8 @@ For more information about the Tradier brokerage, see  the [QuantConnect-Tradier
 
   You can deploy using a visual interface in the QuantConnect cloud. For instructions, see the [QuantConnect-Tradier Integration Page](https://www.quantconnect.com/docs/v2/our-platform/live-trading/brokerages/tradier). 
 
+![deploy-tradier](https://user-images.githubusercontent.com/38889814/188247546-9aac048c-f271-403e-903e-0f9bbfe95b0c.gif)
+
   In the QuantConnect Cloud Platform, you can harness the QuantConnect Live Data Feed or the Tradier Live Data Feed. For most users, this is substantially cheaper and easier than self-hosting.
   
 ### Deploying Tradier with LEAN CLI
