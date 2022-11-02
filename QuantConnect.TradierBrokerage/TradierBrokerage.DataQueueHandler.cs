@@ -39,6 +39,7 @@ namespace QuantConnect.Brokerages.Tradier
 
         private const string WebSocketUrl = "wss://ws.tradier.com/v1/markets/events";
 
+        private object _streamSessionLock = new ();
         private TradierStreamSession _streamSession;
 
         private readonly ConcurrentDictionary<string, Symbol> _subscribedTickers = new ConcurrentDictionary<string, Symbol>();
@@ -261,13 +262,16 @@ namespace QuantConnect.Brokerages.Tradier
         /// </summary>
         private TradierStreamSession GetStreamSession()
         {
-            if (_streamSession == null || !_streamSession.IsValid)
+            lock (_streamSessionLock)
             {
-                var request = new RestRequest("markets/events/session", Method.POST);
-                _streamSession = Execute<TradierStreamSession>(request, TradierApiRequestType.Data, "stream");
-            }
+                if (_streamSession == null || !_streamSession.IsValid)
+                {
+                    var request = new RestRequest("markets/events/session", Method.POST);
+                    _streamSession = Execute<TradierStreamSession>(request, TradierApiRequestType.Data, "stream");
+                }
 
-            return _streamSession;
+                return _streamSession;
+            }
         }
 
         #endregion IDataQueueHandler implementation
