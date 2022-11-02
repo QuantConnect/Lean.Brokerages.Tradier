@@ -23,7 +23,7 @@ namespace QuantConnect.Brokerages.Tradier
     /// </summary>
     public class TradierStreamSession
     {
-        private readonly static TimeSpan LifeSpan = TimeSpan.FromMinutes(4.5);
+        private readonly static TimeSpan LifeSpan = TimeSpan.FromMinutes(4.9);
         private readonly DateTime _createdTime = DateTime.UtcNow;
 
         /// <summary>
