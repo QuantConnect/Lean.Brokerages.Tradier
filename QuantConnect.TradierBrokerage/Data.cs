@@ -447,7 +447,7 @@ namespace QuantConnect.Brokerages.Tradier
 
         /// Trading Stream: Last Price
         [JsonProperty(PropertyName = "price")]
-        public decimal TradePrice;
+        public decimal? TradePrice;
 
         /// Trading Stream: Last Size
         [JsonProperty(PropertyName = "size")]

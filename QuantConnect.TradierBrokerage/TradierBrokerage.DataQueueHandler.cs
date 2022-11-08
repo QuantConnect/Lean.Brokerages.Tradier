@@ -138,7 +138,7 @@ namespace QuantConnect.Brokerages.Tradier
 
             if (symbolsAdded)
             {
-                SendSubscribeMessage(_subscribedTickers.Keys.ToList());
+                _subscribeProcedure.Set();
             }
 
             return true;
@@ -164,19 +164,21 @@ namespace QuantConnect.Brokerages.Tradier
 
             if (symbolsRemoved)
             {
-                var tickers = _subscribedTickers.Keys.ToList();
-
-                // Tradier expects at least one symbol
-                SendSubscribeMessage(tickers.Count > 0
-                    ? tickers
-                    : new List<string> { "$empty$" });
+                _subscribeProcedure.Set();
             }
 
             return true;
         }
 
-        private void SendSubscribeMessage(List<string> tickers)
+        private void SendSubscribeMessage()
         {
+            var tickers = _subscribedTickers.Keys.ToList();
+            if(tickers.Count == 0)
+            {
+                // Tradier expects at least one symbol
+                tickers = new List<string> { "$empty$" };
+            }
+
             var obj = new
             {
                 sessionid = GetStreamSession().SessionId,
@@ -233,7 +235,7 @@ namespace QuantConnect.Brokerages.Tradier
             if (tsd.Type == "trade")
             {
                 // Occasionally Tradier sends trades with 0 volume?
-                if (tsd.TradeSize == 0) return null;
+                if (tsd.TradeSize == 0 || !tsd.TradePrice.HasValue) return null;
             }
 
             // Tradier trades are US NY time only. Convert local server time to NY Time:
@@ -248,7 +250,7 @@ namespace QuantConnect.Brokerages.Tradier
             switch (tsd.Type)
             {
                 case "trade":
-                    return new Tick(time, symbol, "", tsd.TradeExchange, (int)tsd.TradeSize, tsd.TradePrice);
+                    return new Tick(time, symbol, "", tsd.TradeExchange, (int)tsd.TradeSize, tsd.TradePrice.Value);
 
                 case "quote":
                     return new Tick(time, symbol, "", "", tsd.BidSize, tsd.BidPrice, tsd.AskSize, tsd.AskPrice);
