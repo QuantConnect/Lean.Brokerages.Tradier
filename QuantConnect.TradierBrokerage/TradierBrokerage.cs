@@ -79,6 +79,11 @@ namespace QuantConnect.Brokerages.Tradier
         private ISecurityProvider _securityProvider;
         private IDataAggregator _aggregator;
 
+        // we will send subscription requests in batches
+        private Thread _subscribeThead;
+        private readonly ManualResetEvent _subscribeProcedure = new(false);
+        private readonly CancellationTokenSource _cancellationTokenSource = new();
+
         private readonly object _fillLock = new object();
         private readonly DateTime _initializationDateTime = DateTime.Now;
         private ConcurrentDictionary<long, TradierCachedOpenOrder> _cachedOpenOrdersByTradierOrderID;
@@ -938,6 +943,7 @@ namespace QuantConnect.Brokerages.Tradier
         /// </summary>
         public override void Dispose()
         {
+            _subscribeThead.StopSafely(TimeSpan.FromSeconds(5), _cancellationTokenSource);
             _orderFillTimer.DisposeSafely();
         }
 
@@ -1834,6 +1840,46 @@ namespace QuantConnect.Brokerages.Tradier
                 }
             };
             ValidateSubscription();
+
+            _subscribeThead = new Thread(() =>
+            {
+                Log.Trace("TradierBrokerage(): Starting subscription thread");
+                while (true)
+                {
+                    // let's wait for any subscription update request
+                    _subscribeProcedure.WaitOne(_cancellationTokenSource.Token);
+                    if (_cancellationTokenSource.IsCancellationRequested)
+                    {
+                        Log.Trace("TradierBrokerage(): Subscription thread ended");
+                        return;
+                    }
+
+                    // send subscriptions every X seconds, we will aggregate requests during this time
+                    // this is useful for options where we add/remove multiple symbols in the chain sequencially
+                    var subscribeCountDown = 10;
+                    while (subscribeCountDown-- > 0)
+                    {
+                        if (_cancellationTokenSource.Token.WaitHandle.WaitOne(Time.GetSecondUnevenWait(1000)))
+                        {
+                            Log.Trace("TradierBrokerage(): Subscription thread ended");
+                            return;
+                        }
+                    }
+                    // clear flag, any new requesst after this will wait X seconds
+                    // This allows us to avoid race conditions, the API session we will use bellow will not be refreshed until X seconds past as minimum
+                    _subscribeProcedure.Reset();
+
+                    try
+                    {
+                        SendSubscribeMessage();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex);
+                    }
+                }
+            }){ IsBackground = true};
+            _subscribeThead.Start();
         }
 
         private readonly HashSet<string> ErrorsDuringMarketHours = new HashSet<string>
