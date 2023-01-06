@@ -127,22 +127,23 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             bool orderFilledOrCanceled = false;
             var order = parameters.CreateLongOrder(1);
-            EventHandler<OrderEvent> brokerageOnOrderStatusChanged = (sender, args) =>
+            EventHandler<List<OrderEvent>> brokerageOnOrderStatusChanged = (sender, args) =>
             {
+                var orderEvent = args.Single();
                 // we expect all orders to be cancelled except for market orders, they may fill before the next order is submitted
-                if (args.OrderId == order.Id && args.Status == OrderStatus.Canceled || (order is MarketOrder && args.Status == OrderStatus.Filled))
+                if (orderEvent.OrderId == order.Id && orderEvent.Status == OrderStatus.Canceled || (order is MarketOrder && orderEvent.Status == OrderStatus.Filled))
                 {
                     orderFilledOrCanceled = true;
                 }
             };
 
-            Brokerage.OrderStatusChanged += brokerageOnOrderStatusChanged;
+            Brokerage.OrdersStatusChanged += brokerageOnOrderStatusChanged;
 
             // starting from zero initiate two long orders and see that the first is canceled
             PlaceOrderWaitForStatus(order, OrderStatus.Submitted);
             PlaceOrderWaitForStatus(parameters.CreateLongMarketOrder(1));
 
-            Brokerage.OrderStatusChanged -= brokerageOnOrderStatusChanged;
+            Brokerage.OrdersStatusChanged -= brokerageOnOrderStatusChanged;
 
             Assert.IsTrue(orderFilledOrCanceled);
         }
@@ -237,9 +238,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             var message = string.Empty;
             EventHandler<BrokerageMessageEvent> messageHandler = (s, e) => { message = e.Message; };
-            EventHandler<OrderEvent> orderStatusHandler = (s, e) =>
+            EventHandler<List<OrderEvent>> orderStatusHandler = (s, e) =>
             {
-                order.Status = e.Status;
+                order.Status = e.Single().Status;
 
                 if (order.Status == OrderStatus.Canceled)
                 {
@@ -248,7 +249,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             };
 
             Brokerage.Message += messageHandler;
-            Brokerage.OrderStatusChanged += orderStatusHandler;
+            Brokerage.OrdersStatusChanged += orderStatusHandler;
 
             PlaceOrderWaitForStatus(order, OrderStatus.Submitted);
 
@@ -262,7 +263,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Brokerage.CancelOrder(order);
 
             Brokerage.Message -= messageHandler;
-            Brokerage.OrderStatusChanged -= orderStatusHandler;
+            Brokerage.OrdersStatusChanged -= orderStatusHandler;
 
             Assert.That(message.Contains("Unable to cancel the order because it has already been filled or cancelled", StringComparison.InvariantCulture));
         }

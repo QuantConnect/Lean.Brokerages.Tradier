@@ -712,7 +712,7 @@ namespace QuantConnect.Brokerages.Tradier
             var cachedOpenOrder = _cachedOpenOrdersByTradierOrderID.FirstOrDefault(x => x.Value.Order.Symbol == order.Symbol.Value).Value;
             if (cachedOpenOrder != null)
             {
-                var qcOrder = _orderProvider.GetOrderByBrokerageId(cachedOpenOrder.Order.Id);
+                var qcOrder = _orderProvider.GetOrdersByBrokerageId(cachedOpenOrder.Order.Id)?.SingleOrDefault();
                 if (qcOrder == null)
                 {
                     // clean up our mess, this should never be encountered.
@@ -1155,7 +1155,7 @@ namespace QuantConnect.Brokerages.Tradier
                         {
                             // verify we don't have them in the order provider
                             Log.Trace("TradierBrokerage.CheckForFills(): Verifying missing brokerage IDs: " + string.Join(",", localUnknownTradierOrderIDs));
-                            var orders = localUnknownTradierOrderIDs.Select(x => _orderProvider.GetOrderByBrokerageId(x)).Where(x => x != null);
+                            var orders = localUnknownTradierOrderIDs.Select(x => _orderProvider.GetOrdersByBrokerageId(x)?.SingleOrDefault()).Where(x => x != null);
                             var stillUnknownOrderIDs = localUnknownTradierOrderIDs.Where(x => !orders.Any(y => y.BrokerId.Contains(x.ToStringInvariant()))).ToList();
                             if (stillUnknownOrderIDs.Count > 0)
                             {
@@ -1224,7 +1224,7 @@ namespace QuantConnect.Brokerages.Tradier
                 Order qcOrder;
                 if (!_zeroCrossingOrdersByTradierClosingOrderId.TryGetValue(updatedOrder.Id, out qcOrder))
                 {
-                    qcOrder = _orderProvider.GetOrderByBrokerageId(updatedOrder.Id);
+                    qcOrder = _orderProvider.GetOrdersByBrokerageId(updatedOrder.Id)?.SingleOrDefault();
                 }
 
                 if (qcOrder == null)
