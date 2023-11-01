@@ -1847,7 +1847,8 @@ namespace QuantConnect.Brokerages.Tradier
                 while (true)
                 {
                     // let's wait for any subscription update request
-                    _subscribeProcedure.WaitOne(_cancellationTokenSource.Token);
+                    var handles = new WaitHandle[] { _subscribeProcedure, _cancellationTokenSource.Token.WaitHandle };
+                    WaitHandle.WaitAny(handles, GetSubscriptionRefreshTimeout(DateTime.UtcNow));
                     if (_cancellationTokenSource.IsCancellationRequested)
                     {
                         Log.Trace("TradierBrokerage(): Subscription thread ended");
@@ -2117,6 +2118,15 @@ namespace QuantConnect.Brokerages.Tradier
                 Log.Error($"ValidateSubscription(): Failed during validation, shutting down. Error : {e.Message}");
                 System.Environment.Exit(1);
             }
+        }
+
+        /// <summary>
+        /// We refresh 4 am new york, pre market open
+        /// </summary>
+        public static TimeSpan GetSubscriptionRefreshTimeout(DateTime utcTime)
+        {
+            var nyTime = utcTime.ConvertFromUtc(TimeZones.NewYork);
+            return (nyTime.AddDays(1).Date - nyTime) + TimeSpan.FromHours(4);
         }
     }
 }

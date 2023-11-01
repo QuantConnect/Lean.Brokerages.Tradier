@@ -17,17 +17,27 @@ using NUnit.Framework;
 using QuantConnect.Brokerages.Tradier;
 using QuantConnect.Interfaces;
 using QuantConnect.Util;
+using System;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
     [TestFixture]
-    public class TradierBrokerageFactoryTests
+    public class TradierBrokerageAditionalTests
     {
         [Test]
         public void InitializesFactoryFromComposer()
         {
             using var factory = Composer.Instance.Single<IBrokerageFactory>(instance => instance.BrokerageType == typeof(TradierBrokerage));
             Assert.IsNotNull(factory);
+        }
+
+        [TestCase("2022-04-01T15:00:00", "17:00:00")]
+        [TestCase("2022-04-01T20:00:00", "12:00:00")]
+        public void SubscriptionRefreshTimeout(DateTime utctime, TimeSpan expected)
+        {
+            var result = TradierBrokerage.GetSubscriptionRefreshTimeout(utctime);
+
+            Assert.AreEqual(expected, result);
         }
     }
 }
