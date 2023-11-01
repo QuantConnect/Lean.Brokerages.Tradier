@@ -14,8 +14,6 @@
  *
 */
 
-using System;
-
 namespace QuantConnect.Brokerages.Tradier
 {
     /// <summary>
@@ -23,9 +21,6 @@ namespace QuantConnect.Brokerages.Tradier
     /// </summary>
     public class TradierStreamSession
     {
-        private readonly static TimeSpan LifeSpan = TimeSpan.FromMinutes(4.9);
-        private readonly DateTime _createdTime = DateTime.UtcNow;
-
         /// <summary>
         /// Trading Stream: Session Id
         /// </summary>
@@ -35,10 +30,5 @@ namespace QuantConnect.Brokerages.Tradier
         /// Trading Stream: Stream URL
         /// </summary>
         public string Url;
-
-        /// <summary>
-        /// Determines if this session Id is valid
-        /// </summary>
-        public bool IsValid => DateTime.UtcNow - _createdTime < LifeSpan;
     }
 }
