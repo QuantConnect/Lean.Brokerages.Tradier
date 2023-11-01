@@ -29,7 +29,7 @@ using QuantConnect.Tests.Engine.DataFeeds;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
-    public partial class TradierBrokerageTests : BrokerageTests
+    public class TradierBrokerageTests : BrokerageTests
     {
         /// <summary>
         /// Provides the data required to test each order type in various cases
