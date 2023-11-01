@@ -27,7 +27,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading.Tasks;
 
 namespace QuantConnect.Brokerages.Tradier
 {
@@ -37,9 +36,6 @@ namespace QuantConnect.Brokerages.Tradier
     public partial class TradierBrokerage
     {
         #region IDataQueueHandler implementation
-
-        private readonly static TimeSpan SessionTimeout = TimeSpan.FromMinutes(4.8);
-        private bool _sessionExpired;
 
         private const string WebSocketUrl = "wss://ws.tradier.com/v1/markets/events";
 
@@ -270,23 +266,10 @@ namespace QuantConnect.Brokerages.Tradier
         {
             lock (_streamSessionLock)
             {
-                if (_streamSession == null || _sessionExpired)
+                if (_streamSession == null || !_streamSession.IsValid)
                 {
                     var request = new RestRequest("markets/events/session", Method.POST);
                     _streamSession = Execute<TradierStreamSession>(request, TradierApiRequestType.Data, "stream");
-
-                    // clear expired state, we just refreshed it
-                    _sessionExpired = false;
-
-                    // after timeout, expire the session and refresh subscriptions, which will refresh token
-                    Task.Delay(SessionTimeout).ContinueWith(_ =>
-                    {
-                        lock (_streamSessionLock)
-                        {
-                            _sessionExpired = true;
-                            _subscribeProcedure.Set();
-                        }
-                    });
                 }
 
                 return _streamSession;
