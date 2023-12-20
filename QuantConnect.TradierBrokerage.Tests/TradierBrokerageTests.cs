@@ -98,14 +98,22 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             return false;
         }
 
-        [Test]
-        public void GetQuotesDoesNotReturnNull()
+        [TestCase("VXX190517P00016000", true)]
+        [TestCase("AAPL231222C00200000", false)]
+        public void GetQuotesDoesNotReturnNull(string contract, bool isEmpty)
         {
             var tradier = (TradierBrokerage) Brokerage;
-            var quotes = tradier.GetQuotes(new List<string> { "VXX190517P00016000" });
+            var quotes = tradier.GetQuotes(new List<string> { contract });
 
             Assert.IsNotNull(quotes);
-            Assert.IsEmpty(quotes);
+            if(isEmpty)
+            {
+                Assert.IsEmpty(quotes);
+            }
+            else
+            {
+                Assert.IsNotEmpty(quotes);
+            }
         }
 
         /// <summary>
