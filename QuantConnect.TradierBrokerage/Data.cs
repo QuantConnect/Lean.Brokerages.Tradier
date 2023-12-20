@@ -210,10 +210,6 @@ namespace QuantConnect.Brokerages.Tradier
         private string Options_ExpirationDate;
 #pragma warning restore 0169
 
-        ///Option Exp Type
-        [JsonProperty(PropertyName = "expiration_type")]
-        private TradierOptionExpirationType Options_ExpirationType = TradierOptionExpirationType.Standard;
-
         /// Option Type
         [JsonProperty(PropertyName = "option_type")]
         private TradierOptionType Options_OptionType = TradierOptionType.Call;

@@ -248,20 +248,6 @@ namespace QuantConnect.Brokerages.Tradier
     }
 
     /// <summary>
-    /// Tradier options expiration
-    /// </summary>
-    [JsonConverter(typeof(StringEnumConverter))]
-    public enum TradierOptionExpirationType
-    {
-        /// Option Expiration std.
-        [EnumMember(Value = "standard")]
-        Standard,
-        /// Option Expiration std.
-        [EnumMember(Value = "weekly")]
-        Weekly
-    }
-
-    /// <summary>
     /// Account classification
     /// </summary>
     [JsonConverter(typeof(StringEnumConverter))]
