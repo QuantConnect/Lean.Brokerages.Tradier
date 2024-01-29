@@ -1620,47 +1620,25 @@ namespace QuantConnect.Brokerages.Tradier
             // Equity codes: buy, buy_to_cover, sell, sell_short
             // Option codes: buy_to_open, buy_to_close, sell_to_open, sell_to_close
             // Tradier has 4 types of orders for this: buy/sell/buy to cover and sell short.
-            // 2 of the types are specifically for opening, lets handle those first
-            if (holdingQuantity == 0)
+
+            var position = GetOrderPosition(direction, holdingQuantity);
+            return position switch
             {
-                // Open a position: Both open long and open short
-                switch (direction)
-                {
-                    case OrderDirection.Buy:
-                        return securityType == SecurityType.Option ? TradierOrderDirection.BuyToOpen : TradierOrderDirection.Buy;
+                // Increasing existing long position or opening new long position from zero
+                OrderPosition.BuyToOpen => securityType == SecurityType.Option ? TradierOrderDirection.BuyToOpen : TradierOrderDirection.Buy,
 
-                    case OrderDirection.Sell:
-                        return securityType == SecurityType.Option ? TradierOrderDirection.SellToOpen : TradierOrderDirection.SellShort;
-                }
-            }
-            else if (holdingQuantity > 0)
-            {
-                switch (direction)
-                {
-                    case OrderDirection.Buy:
-                        // Increasing existing long position
-                        return securityType == SecurityType.Option ? TradierOrderDirection.BuyToOpen : TradierOrderDirection.Buy;
+                // Decreasing existing short position or opening new short position from zero
+                OrderPosition.SellToOpen => securityType == SecurityType.Option ? TradierOrderDirection.SellToOpen : TradierOrderDirection.SellShort,
 
-                    case OrderDirection.Sell:
-                        // Reducing existing long position
-                        return securityType == SecurityType.Option ? TradierOrderDirection.SellToClose : TradierOrderDirection.Sell;
-                }
-            }
-            else if (holdingQuantity < 0)
-            {
-                switch (direction)
-                {
-                    case OrderDirection.Buy:
-                        // Reducing existing short position
-                        return securityType == SecurityType.Option ? TradierOrderDirection.BuyToClose : TradierOrderDirection.BuyToCover;
+                // Buying from an existing short position (reducing, closing or flipping)
+                OrderPosition.BuyToClose => securityType == SecurityType.Option ? TradierOrderDirection.BuyToClose : TradierOrderDirection.BuyToCover,
 
-                    case OrderDirection.Sell:
-                        // Increasing existing short position
-                        return securityType == SecurityType.Option ? TradierOrderDirection.SellToOpen : TradierOrderDirection.SellShort;
-                }
-            }
+                // Selling from an existing long position (reducing, closing or flipping)
+                OrderPosition.SellToClose => securityType == SecurityType.Option ? TradierOrderDirection.SellToClose : TradierOrderDirection.Sell,
 
-            return TradierOrderDirection.None;
+                // This should never happen
+                _ => TradierOrderDirection.None
+            };
         }
 
         /// <summary>

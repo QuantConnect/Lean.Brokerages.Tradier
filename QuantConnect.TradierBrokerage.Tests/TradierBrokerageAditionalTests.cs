@@ -16,6 +16,7 @@
 using NUnit.Framework;
 using QuantConnect.Brokerages.Tradier;
 using QuantConnect.Interfaces;
+using QuantConnect.Orders;
 using QuantConnect.Util;
 using System;
 
@@ -41,6 +42,33 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var result = TradierBrokerage.GetSubscriptionRefreshTimeout(utctime);
 
             Assert.AreEqual(expected, result);
+        }
+
+        // Options
+        [TestCase(OrderDirection.Buy, 0, SecurityType.Option, ExpectedResult = TradierOrderDirection.BuyToOpen)]
+        [TestCase(OrderDirection.Buy, 100, SecurityType.Option, ExpectedResult = TradierOrderDirection.BuyToOpen)]
+        [TestCase(OrderDirection.Buy, -100, SecurityType.Option, ExpectedResult = TradierOrderDirection.BuyToClose)]
+        [TestCase(OrderDirection.Sell, 0, SecurityType.Option, ExpectedResult = TradierOrderDirection.SellToOpen)]
+        [TestCase(OrderDirection.Sell, 100, SecurityType.Option, ExpectedResult = TradierOrderDirection.SellToClose)]
+        [TestCase(OrderDirection.Sell, -100, SecurityType.Option, ExpectedResult = TradierOrderDirection.SellToOpen)]
+        // Equities
+        [TestCase(OrderDirection.Buy, 0, SecurityType.Equity, ExpectedResult = TradierOrderDirection.Buy)]
+        [TestCase(OrderDirection.Buy, 100, SecurityType.Equity, ExpectedResult = TradierOrderDirection.Buy)]
+        [TestCase(OrderDirection.Buy, -100, SecurityType.Equity, ExpectedResult = TradierOrderDirection.BuyToCover)]
+        [TestCase(OrderDirection.Sell, 0, SecurityType.Equity, ExpectedResult = TradierOrderDirection.SellShort)]
+        [TestCase(OrderDirection.Sell, 100, SecurityType.Equity, ExpectedResult = TradierOrderDirection.Sell)]
+        [TestCase(OrderDirection.Sell, -100, SecurityType.Equity, ExpectedResult = TradierOrderDirection.SellShort)]
+        public TradierOrderDirection ConvertsOrderDirection(OrderDirection direction, decimal holdingsQuantity, SecurityType securityType)
+        {
+            return TestableTradierBrokerage.ConvertDirectionPublic(direction, securityType, holdingsQuantity);
+        }
+
+        private class TestableTradierBrokerage : TradierBrokerage
+        {
+            public static TradierOrderDirection ConvertDirectionPublic(OrderDirection direction, SecurityType securityType, decimal holdingQuantity)
+            {
+                return ConvertDirection(direction, securityType, holdingQuantity);
+            }
         }
     }
 }
