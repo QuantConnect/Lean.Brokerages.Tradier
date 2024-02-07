@@ -20,5 +20,6 @@
 			"Stop Limit Order": [1,1]		
 		}
 	],
+	"data-supported": [ "Equity", "Equity Options" ], 
 	"more-information":"https://tradier.com/individuals/pricing"
 }
