@@ -10,7 +10,7 @@
 		}
 	],
 	"order-types": ["Market", "Limit", "Limit-If-Touched", "Stop Market",  "Stop Limit", "Trailing", "Market On Open", "Market On Close", "Combo Market", "Combo Limit", "Combo Leg Limit", "Exercise"],
-	"data-supported": ["Equity", "Equity Options"], 
+	"assets": ["Equity", "Equity Options"], 
 	"brokerage-url": "https://tradier.com/individuals/pricing",
   	"documentation": "/docs/v2/cloud-platform/live-trading/brokerages/tradier"
 }
