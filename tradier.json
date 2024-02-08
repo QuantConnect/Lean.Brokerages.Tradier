@@ -1,6 +1,5 @@
 {
-	"description":"Tradier is a reliable low-cost Equities and Equity-Options REST-API brokerage. They have options to select $0-fee trading on equities and options.",
-	
+	"description": "Tradier is a reliable low-cost Equities and Equity-Options REST-API brokerage. They have options to select $0-fee trading on equities and options.",
 	"platforms-features":[
 		{
 			"Platforms": ["Cloud Platform", "Local Platform", "LEAN CLI"],
@@ -10,16 +9,8 @@
 			"Live Trading":	[1,1,1]
 		}
 	],
-	
-	"order-types-markets":[
-		{
-			"Order Type": ["Equity", "Equity Options"],
-			"Market Order": [1,1],
-			"Limit Order": [1,1],
-			"Stop Market Order": [1,1],
-			"Stop Limit Order": [1,1]		
-		}
-	],
-	"data-supported": [ "Equity", "Equity Options" ], 
-	"more-information":"https://tradier.com/individuals/pricing"
+	"order-types": ["Market", "Limit", "Limit-If-Touched", "Stop Market",  "Stop Limit", "Trailing", "Market On Open", "Market On Close", "Combo Market", "Combo Limit", "Combo Leg Limit", "Exercise"],
+	"data-supported": ["Equity", "Equity Options"], 
+	"brokerage-url": "https://tradier.com/individuals/pricing",
+  	"documentation": "/docs/v2/cloud-platform/live-trading/brokerages/tradier"
 }
