@@ -43,9 +43,6 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         {
             get
             {
-                var seasEquity = Symbol.Create("SEAS", SecurityType.Equity, Market.USA);
-                var seasOptionSymbol = Symbol.CreateOption(seasEquity, Market.USA, OptionStyle.American, OptionRight.Call, 50, new DateTime(2022, 8, 19));
-
                 return new[]
                 {
                     // valid parameters
@@ -55,17 +52,15 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                     new TestCaseData(Symbols.AAPL, Resolution.Hour, false, 7 * 2, TickType.Trade),
                     new TestCaseData(Symbols.AAPL, Resolution.Daily, false, 6, TickType.Trade),
 
-                    // invalid data type, returns empty response
-                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, 0, TickType.Quote),
-                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, 0, TickType.OpenInterest),
+                    // invalid tick type, null result
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, true, 0, TickType.Quote),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, true, 0, TickType.OpenInterest),
 
-                    new TestCaseData(seasOptionSymbol, Resolution.Daily, false, 0, TickType.Trade),
-
-                    // invalid canonical symbo, throws "System.ArgumentException : Invalid symbol, cannot use canonical"
+                    // canonical symbol, null result
                     new TestCaseData(Symbols.SPY_Option_Chain, Resolution.Daily, true, 0, TickType.Trade),
 
-                    // invalid security type, throws "System.ArgumentException : Invalid security type: Forex"
-                    new TestCaseData(Symbols.EURUSD, Resolution.Daily, true, 0, TickType.Trade),
+                    // invalid security type, null result
+                    new TestCaseData(Symbols.EURUSD, Resolution.Daily, true, 0, TickType.Trade)
                 };
             }
         }
@@ -90,7 +85,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         }
 
         [Test, TestCaseSource(nameof(TestParameters))]
-        public void GetsHistory(Symbol symbol, Resolution resolution, bool throwsException, int expectedCount, TickType tickType)
+        public void GetsHistory(Symbol symbol, Resolution resolution, bool unsupported, int expectedCount, TickType tickType)
         {
             if (_useSandbox && (resolution == Resolution.Tick || resolution == Resolution.Second))
             {
@@ -104,9 +99,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var request = new HistoryRequest(startUtc, endUtc, LeanData.GetDataType(resolution, tickType), symbol, resolution, mhdb.ExchangeHours,
                 mhdb.DataTimeZone, null, false, false, DataNormalizationMode.Adjusted, tickType);
 
-            if (throwsException)
+            if (unsupported)
             {
-                Assert.Throws<ArgumentException>(() => GetHistoryHelper(request));
+                Assert.IsNull(_brokerage.GetHistory(request));
             }
             else
             {
@@ -197,7 +192,11 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         {
             var count = 0;
             BaseData previous = null;
-            foreach (var data in _brokerage.GetHistory(request))
+            var history = _brokerage.GetHistory(request);
+
+            Assert.IsNotNull(history);
+
+            foreach (var data in history)
             {
                 Assert.AreEqual(request.Resolution.ToTimeSpan(), data.EndTime - data.Time);
 
