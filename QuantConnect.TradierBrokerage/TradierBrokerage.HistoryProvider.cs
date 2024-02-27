@@ -32,6 +32,8 @@ namespace QuantConnect.Brokerages.Tradier
     public partial class TradierBrokerage
     {
         private bool _loggedTradierSupportsOnlyTradeBars;
+        private bool _loggedUnsupportedAssetForHistory;
+        private bool _loggedInvalidTimeRangeForHistory;
 
         /// <summary>
         /// Gets the history for the requested security
@@ -40,19 +42,26 @@ namespace QuantConnect.Brokerages.Tradier
         /// <returns>An enumerable of bars covering the span specified in the request</returns>
         public override IEnumerable<BaseData> GetHistory(HistoryRequest request)
         {
-            if (request.Symbol.ID.SecurityType != SecurityType.Equity && request.Symbol.ID.SecurityType != SecurityType.Option)
+            if (!CanSubscribe(request.Symbol))
             {
-                throw new ArgumentException($"Invalid security type: {request.Symbol.ID.SecurityType}");
+                if (!_loggedUnsupportedAssetForHistory)
+                {
+                    _loggedUnsupportedAssetForHistory = true;
+                    _algorithm?.Debug("Warning: Tradier does not support this asset for history requests.");
+                    Log.Error("TradierBrokerage.GetHistory(): Unsupported asset: " + request.Symbol.Value);
+                }
+                return null;
             }
 
             if (request.StartTimeUtc >= request.EndTimeUtc)
             {
-                throw new ArgumentException("Invalid date range specified start time can not be after end time");
-            }
-
-            if (request.Symbol.IsCanonical())
-            {
-                throw new ArgumentException("Invalid symbol, cannot use canonical symbols for history request");
+                if (!_loggedInvalidTimeRangeForHistory)
+                {
+                    _loggedInvalidTimeRangeForHistory = true;
+                    _algorithm?.Debug("Warning: The request start date must precede the end date, no history returned.");
+                    Log.Error("TradierBrokerage.GetHistory(): Invalid date range.");
+                }
+                return null;
             }
 
             if (request.TickType != TickType.Trade)
@@ -63,12 +72,11 @@ namespace QuantConnect.Brokerages.Tradier
                     _algorithm?.Debug("Warning: Tradier history provider only supports trade information, does not support quotes.");
                     Log.Error("TradierBrokerage.GetHistory(): Tradier only supports TradeBars");
                 }
-                yield break;
+                return null;
             }
 
             var start = request.StartTimeUtc.ConvertTo(DateTimeZone.Utc, TimeZones.NewYork);
             var end = request.EndTimeUtc.ConvertTo(DateTimeZone.Utc, TimeZones.NewYork);
-
 
             IEnumerable<BaseData> history;
             switch (request.Resolution)
@@ -97,13 +105,9 @@ namespace QuantConnect.Brokerages.Tradier
                     throw new ArgumentException("Invalid date range specified");
             }
 
-            foreach (var bar in history.Where(bar => bar.Time >= request.StartTimeLocal && bar.EndTime <= request.EndTimeLocal))
-            {
-                if (request.ExchangeHours.IsOpen(bar.Time, bar.EndTime, request.IncludeExtendedMarketHours))
-                {
-                    yield return bar;
-                }
-            }
+            return history.Where(bar => bar.Time >= request.StartTimeLocal &&
+                bar.EndTime <= request.EndTimeLocal &&
+                request.ExchangeHours.IsOpen(bar.Time, bar.EndTime, request.IncludeExtendedMarketHours));
         }
 
         private IEnumerable<BaseData> GetHistoryTick(HistoryRequest request, DateTime start, DateTime end)
