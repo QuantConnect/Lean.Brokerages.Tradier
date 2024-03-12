@@ -34,6 +34,7 @@ namespace QuantConnect.Brokerages.Tradier
         private bool _loggedTradierSupportsOnlyTradeBars;
         private bool _loggedUnsupportedAssetForHistory;
         private bool _loggedInvalidTimeRangeForHistory;
+        private bool _loggedInvalidStartTimeForHistory;
 
         /// <summary>
         /// Gets the history for the requested security
@@ -75,8 +76,8 @@ namespace QuantConnect.Brokerages.Tradier
                 return null;
             }
 
-            var start = request.StartTimeUtc.ConvertTo(DateTimeZone.Utc, TimeZones.NewYork);
-            var end = request.EndTimeUtc.ConvertTo(DateTimeZone.Utc, TimeZones.NewYork);
+            var start = request.StartTimeUtc.ConvertFromUtc(TimeZones.NewYork);
+            var end = request.EndTimeUtc.ConvertFromUtc(TimeZones.NewYork);
 
             IEnumerable<BaseData> history;
             switch (request.Resolution)
@@ -114,12 +115,7 @@ namespace QuantConnect.Brokerages.Tradier
         {
             var symbol = request.Symbol;
             var exchangeTz = request.ExchangeHours.TimeZone;
-            var history = GetTimeSeries(symbol, start, end, TradierTimeSeriesIntervals.Tick);
-
-            if (history == null)
-            {
-                return Enumerable.Empty<BaseData>();
-            }
+            var history = GetTimeSeries(request, start, end, TradierTimeSeriesIntervals.Tick);
 
             return history.Select(tick => new Tick
             {
@@ -159,12 +155,7 @@ namespace QuantConnect.Brokerages.Tradier
             var symbol = request.Symbol;
             var exchangeTz = request.ExchangeHours.TimeZone;
             var requestedBarSpan = request.Resolution.ToTimeSpan();
-            var history = GetTimeSeries(symbol, start, end, TradierTimeSeriesIntervals.OneMinute);
-
-            if (history == null)
-            {
-                return Enumerable.Empty<BaseData>();
-            }
+            var history = GetTimeSeries(request, start, end, TradierTimeSeriesIntervals.OneMinute);
 
             return history.Select(bar => new TradeBar(bar.Time, symbol, bar.Open, bar.High, bar.Low, bar.Close, bar.Volume, requestedBarSpan));
         }
@@ -174,12 +165,7 @@ namespace QuantConnect.Brokerages.Tradier
             var symbol = request.Symbol;
             var exchangeTz = request.ExchangeHours.TimeZone;
             var requestedBarSpan = request.Resolution.ToTimeSpan();
-            var history = GetTimeSeries(symbol, start, end, TradierTimeSeriesIntervals.FifteenMinutes);
-
-            if (history == null)
-            {
-                return Enumerable.Empty<BaseData>();
-            }
+            var history = GetTimeSeries(request, start, end, TradierTimeSeriesIntervals.FifteenMinutes);
 
             var tradierBarSpan = TimeSpan.FromMinutes(15);
             var result = history.Select(bar => new TradeBar(bar.Time, symbol, bar.Open, bar.High, bar.Low, bar.Close, bar.Volume, tradierBarSpan));

@@ -17,7 +17,6 @@
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using QuantConnect.Api;
-using QuantConnect.Configuration;
 using QuantConnect.Data;
 using QuantConnect.Interfaces;
 using QuantConnect.Logging;
@@ -498,19 +497,85 @@ namespace QuantConnect.Brokerages.Tradier
         /// <summary>
         /// Get the historical bars for this period
         /// </summary>
-        private List<TradierTimeSeries> GetTimeSeries(Symbol symbol, DateTime start, DateTime end, TradierTimeSeriesIntervals interval)
+        private IEnumerable<TradierTimeSeries> GetTimeSeries(HistoryRequest historyRequest, DateTime start, DateTime end, TradierTimeSeriesIntervals interval)
         {
-            // Create and send request
-            var ticker = _symbolMapper.GetBrokerageSymbol(symbol);
-            var request = new RestRequest("markets/timesales", Method.GET);
-            request.AddParameter("symbol", ticker, ParameterType.QueryString);
-            request.AddParameter("interval", GetEnumDescription(interval), ParameterType.QueryString);
-            request.AddParameter("start", start.ToStringInvariant("yyyy-MM-dd HH:mm"), ParameterType.QueryString);
-            request.AddParameter("end", end.ToStringInvariant("yyyy-MM-dd HH:mm"), ParameterType.QueryString);
-            var dataContainer = Execute<TradierTimeSeriesContainer>(request, TradierApiRequestType.Data, "series");
+            // Create and send request, take into account tradier limitations, else we get an error like:
+            // 'Invalid parameter, start: must be on or after 2024-01-15 00:00:00.'
+            // ref https://documentation.tradier.com/brokerage-api/markets/get-timesales
+            /*
+Interval	Data Available (Open)	Data Available (All)
+	tick	5 days					N/A
+	1min	20 days					10 days
+	5min	40 days					18 days
+	15min	40 days					18 days
+             */
+            TimeSpan maximumTimeAgo;
+            if (interval == TradierTimeSeriesIntervals.FifteenMinutes || interval == TradierTimeSeriesIntervals.FiveMinutes)
+            {
+                maximumTimeAgo = TimeSpan.FromDays(40);
+            }
+            else if (interval == TradierTimeSeriesIntervals.OneMinute)
+            {
+                maximumTimeAgo = TimeSpan.FromDays(20);
+            }
+            else if (interval == TradierTimeSeriesIntervals.Tick)
+            {
+                maximumTimeAgo = TimeSpan.FromDays(5);
+            }
+            else
+            {
+                throw new ArgumentException($"Invalid TradierTimeSeriesIntervals value: {interval}");
+            }
 
-            // there could be no data the requested symbol and time, tradier will return null
-            return dataContainer?.TimeSeries ?? new List<TradierTimeSeries>();
+            var nyCurrentTime = DateTime.UtcNow.ConvertFromUtc(TimeZones.NewYork);
+            if (nyCurrentTime - start > maximumTimeAgo)
+            {
+                if (!_loggedInvalidStartTimeForHistory)
+                {
+                    _loggedInvalidStartTimeForHistory = true;
+                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "InvalidStartTime", "Warning: Adjusting history request start time to fit Tradier limitations"));
+                }
+
+                start = nyCurrentTime.Add(-maximumTimeAgo);
+                if (start > end)
+                {
+                    yield break;
+                }
+            }
+
+            var requestEnd = end;
+            var requestStart = start;
+
+            // we ask tick data in chunks, if not tradier API blows up
+            if (interval == TradierTimeSeriesIntervals.Tick && requestEnd > (requestStart + Time.OneHour))
+            {
+                requestEnd = requestStart + Time.OneHour;
+            }
+
+            var ticker = _symbolMapper.GetBrokerageSymbol(historyRequest.Symbol);
+            do
+            {
+                if (historyRequest.ExchangeHours.IsOpen(requestStart, requestEnd, historyRequest.IncludeExtendedMarketHours))
+                {
+                    var request = new RestRequest("markets/timesales", Method.GET);
+                    request.AddParameter("symbol", ticker, ParameterType.QueryString);
+                    request.AddParameter("interval", GetEnumDescription(interval), ParameterType.QueryString);
+                    request.AddParameter("start", requestStart.ToStringInvariant("yyyy-MM-dd HH:mm"), ParameterType.QueryString);
+                    request.AddParameter("end", requestEnd.ToStringInvariant("yyyy-MM-dd HH:mm"), ParameterType.QueryString);
+                    request.AddParameter("session_filter", historyRequest.IncludeExtendedMarketHours ? "all" : "open", ParameterType.QueryString);
+                    var dataContainer = Execute<TradierTimeSeriesContainer>(request, TradierApiRequestType.Data, "series");
+
+                    // there could be no data the requested symbol and time, tradier will return null
+                    foreach (var point in dataContainer?.TimeSeries ?? Enumerable.Empty<TradierTimeSeries>())
+                    {
+                        yield return point;
+                    }
+                }
+
+                requestStart += Time.OneHour;
+                requestEnd += Time.OneHour;
+            }
+            while (requestEnd < end);
         }
 
         /// <summary>
