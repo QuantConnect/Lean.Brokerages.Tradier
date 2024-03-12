@@ -63,6 +63,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         private static void SetUp()
         {
             Log.LogHandler = new CompositeLogHandler();
+            Log.DebuggingEnabled = Config.GetBool("debug-mode");
             Log.Trace("TestSetup(): starting...");
             ReloadConfiguration();
         }

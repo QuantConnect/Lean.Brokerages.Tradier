@@ -46,21 +46,38 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 return new[]
                 {
                     // valid parameters
-                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false, -1, TickType.Trade),
-                    new TestCaseData(Symbols.AAPL, Resolution.Second, false, -1, TickType.Trade),
-                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, 60 + 1, TickType.Trade),
-                    new TestCaseData(Symbols.AAPL, Resolution.Hour, false, 7 * 2, TickType.Trade),
-                    new TestCaseData(Symbols.AAPL, Resolution.Daily, false, 6, TickType.Trade),
+                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false, false, 60 * 6 * 2, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false, false, 30, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false, true, 60 * 6 * 2, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false, true, 30, TickType.Trade, -1),
+
+                    new TestCaseData(Symbols.AAPL, Resolution.Second, false, false, 60 * 6 * 10, TickType.Trade, 60 * 6 * 5),
+                    new TestCaseData(Symbols.AAPL, Resolution.Second, false, false, 30, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Second, false, true, 60 * 6 * 2, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Second, false, true, 30, TickType.Trade, -1),
+
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, false, 60 * 6 * 50, TickType.Trade, 60 * 6 * 15),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, false, 60 + 1, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, true, 60 * 6 * 15, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, false, true, 60 + 1, TickType.Trade, -1),
+
+                    new TestCaseData(Symbols.AAPL, Resolution.Hour, false, false, 6 * 80, TickType.Trade, 6 * 30),
+                    new TestCaseData(Symbols.AAPL, Resolution.Hour, false, false, 5, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Hour, false, true, 6 * 80, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Hour, false, true, 5, TickType.Trade, -1),
+
+                    new TestCaseData(Symbols.AAPL, Resolution.Daily, false, false, 60, TickType.Trade, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Daily, false, false, 6, TickType.Trade, -1),
 
                     // invalid tick type, null result
-                    new TestCaseData(Symbols.AAPL, Resolution.Minute, true, 0, TickType.Quote),
-                    new TestCaseData(Symbols.AAPL, Resolution.Minute, true, 0, TickType.OpenInterest),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, true, false, 0, TickType.Quote, -1),
+                    new TestCaseData(Symbols.AAPL, Resolution.Minute, true, false, 0, TickType.OpenInterest, -1),
 
                     // canonical symbol, null result
-                    new TestCaseData(Symbols.SPY_Option_Chain, Resolution.Daily, true, 0, TickType.Trade),
+                    new TestCaseData(Symbols.SPY_Option_Chain, Resolution.Daily, true, false, 0, TickType.Trade, -1),
 
                     // invalid security type, null result
-                    new TestCaseData(Symbols.EURUSD, Resolution.Daily, true, 0, TickType.Trade)
+                    new TestCaseData(Symbols.EURUSD, Resolution.Daily, true, false, 0, TickType.Trade, -1)
                 };
             }
         }
@@ -85,7 +102,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         }
 
         [Test, TestCaseSource(nameof(TestParameters))]
-        public void GetsHistory(Symbol symbol, Resolution resolution, bool unsupported, int expectedCount, TickType tickType)
+        public void GetsHistory(Symbol symbol, Resolution resolution, bool unsupported, bool extendedMarketHours, int expectedCount, TickType tickType, int adjustedExpectedCount = -1)
         {
             if (_useSandbox && (resolution == Resolution.Tick || resolution == Resolution.Second))
             {
@@ -94,10 +111,10 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             }
             var mhdb = MarketHoursDatabase.FromDataFolder().GetEntry(symbol.ID.Market, symbol, symbol.SecurityType);
 
-            GetStartEndTime(mhdb, resolution, expectedCount, out var startUtc, out var endUtc);
+            GetStartEndTime(mhdb, resolution, expectedCount, extendedMarketHours, out var startUtc, out var endUtc);
 
             var request = new HistoryRequest(startUtc, endUtc, LeanData.GetDataType(resolution, tickType), symbol, resolution, mhdb.ExchangeHours,
-                mhdb.DataTimeZone, null, false, false, DataNormalizationMode.Adjusted, tickType);
+                mhdb.DataTimeZone, null, includeExtendedMarketHours: extendedMarketHours, false, DataNormalizationMode.Adjusted, tickType);
 
             if (unsupported)
             {
@@ -114,7 +131,17 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 }
                 else
                 {
-                    Assert.AreEqual(expectedCount, count, $"Symbol: {request.Symbol.Value}. Resolution {request.Resolution}");
+                    if (adjustedExpectedCount != -1)
+                    {
+                        // the request was over the tradier api limit so it get's reduced
+                        expectedCount = adjustedExpectedCount;
+                    }
+
+                    // add some padding for extended market hours, cause it ain't precise
+                    var delta = (request.IncludeExtendedMarketHours || adjustedExpectedCount != -1)
+                        ? expectedCount * 0.15
+                        : 0;
+                    Assert.AreEqual(expectedCount, count, delta, $"Symbol: {request.Symbol.Value}. Resolution {request.Resolution}");
                 }
             }
         }
@@ -123,7 +150,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         [TestCase(Resolution.Hour, 30)]
         [TestCase(Resolution.Minute, 60 * 10)]
         [TestCase(Resolution.Second, 60 * 10 * 5)]
-        [TestCase(Resolution.Tick, -1)]
+        [TestCase(Resolution.Tick, 30)]
         public void GetsOptionHistory(Resolution resolution, int expectedCount)
         {
             if (_useSandbox && (resolution == Resolution.Tick || resolution == Resolution.Second))
@@ -134,7 +161,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var spy = Symbol.Create("SPY", SecurityType.Equity, Market.USA);
             var mhdb = MarketHoursDatabase.FromDataFolder().GetEntry(spy.ID.Market, spy, spy.SecurityType);
 
-            GetStartEndTime(mhdb, resolution, expectedCount, out var startUtc, out var endUtc);
+            GetStartEndTime(mhdb, resolution, expectedCount, false, out var startUtc, out var endUtc);
 
             var chain = _chainProvider.GetOptionContractList(spy, startUtc.ConvertFromUtc(mhdb.ExchangeHours.TimeZone)).ToList();
 
@@ -170,12 +197,12 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.Greater(count, 15, $"Symbol: {request.Symbol.Value}. Resolution {request.Resolution}");
         }
 
-        private void GetStartEndTime(MarketHoursDatabase.Entry entry, Resolution resolution, int expectedCount, out DateTime startTimeUtc, out DateTime endTimeUtc)
+        private void GetStartEndTime(MarketHoursDatabase.Entry entry, Resolution resolution, int expectedCount,
+            bool extendedMarketHours, out DateTime startTimeUtc, out DateTime endTimeUtc)
         {
             if (resolution == Resolution.Tick || resolution == Resolution.Second)
             {
                 // for tick ask for X minutes worth of data
-                expectedCount = 30;
                 resolution = Resolution.Minute;
             }
 
@@ -184,7 +211,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var endLocalTime = endTimeUtc.ConvertFromUtc(entry.ExchangeHours.TimeZone);
             var resolutionSpan = resolution.ToTimeSpan();
 
-            var localStartTime = Time.GetStartTimeForTradeBars(entry.ExchangeHours, endLocalTime, resolutionSpan, expectedCount, false, entry.DataTimeZone);
+            var localStartTime = Time.GetStartTimeForTradeBars(entry.ExchangeHours, endLocalTime, resolutionSpan, expectedCount, extendedMarketHours, entry.DataTimeZone);
             startTimeUtc = localStartTime.ConvertToUtc(entry.ExchangeHours.TimeZone);
         }
 
