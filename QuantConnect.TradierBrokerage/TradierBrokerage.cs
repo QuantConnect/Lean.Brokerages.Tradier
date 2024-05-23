@@ -803,62 +803,19 @@ Interval	Data Available (Open)	Data Available (All)
                 }
             }
 
-            var holdingQuantity = _securityProvider.GetHoldingsQuantity(order.Symbol);
-
-            var classification = ConvertSecurityType(order.SecurityType);
-
-            var orderRequest = new TradierPlaceOrderRequest(order, classification, holdingQuantity, _symbolMapper);
-
-            // do we need to split the order into two pieces?
-            bool crossesZero = OrderCrossesZero(order);
-            if (crossesZero)
-            {
-                // first we need an order to close out the current position
-                var firstOrderQuantity = -holdingQuantity;
-                var secondOrderQuantity = order.Quantity - firstOrderQuantity;
-
-                orderRequest.Quantity = Math.Abs(firstOrderQuantity);
-
-                // we actually can't place this order until the closingOrder is filled
-                // create another order for the rest, but we'll convert the order type to not be a stop
-                // but a market or a limit order
-                var restOfOrder = new TradierPlaceOrderRequest(order, classification, 0, _symbolMapper)
-                {
-                    Quantity = Math.Abs(secondOrderQuantity)
-                };
-                restOfOrder.ConvertStopOrderTypes();
-
-                _contingentOrdersByQCOrderID.AddOrUpdate(order.Id, new ContingentOrderQueue(order, restOfOrder));
-
-                // issue the first order to close the position
-                var response = TradierPlaceOrder(orderRequest);
-                bool success = response.Errors.Errors.IsNullOrEmpty();
-                if (!success)
-                {
-                    // remove the contingent order if we weren't succesful in placing the first
-                    ContingentOrderQueue contingent;
-                    _contingentOrdersByQCOrderID.TryRemove(order.Id, out contingent);
-                    return false;
-                }
-
-                var closingOrderID = response.Order.Id;
-                order.BrokerId.Add(closingOrderID.ToStringInvariant());
-
-                _zeroCrossingOrdersByTradierClosingOrderId.AddOrUpdate(closingOrderID, order);
-
-                return true;
-            }
-            else
+            return TryCrossPoistionOrder(_securityProvider, order,
+                (order, orderQuantity, holdingQuantity) => new TradierPlaceOrderRequest(order, orderQuantity, ConvertSecurityType(order.SecurityType), holdingQuantity, _symbolMapper),
+                (traiderOrder) => traiderOrder.ConvertStopOrderTypes(),
+                (orderRequest) =>
             {
                 var response = TradierPlaceOrder(orderRequest);
-                if (response == null || !response.Errors.Errors.IsNullOrEmpty())
+                    if (!response.Errors.Errors.IsNullOrEmpty())
                 {
-                    return false;
+                        return (false, string.Empty);
                 }
-                order.BrokerId.Add(response.Order.Id.ToStringInvariant());
-                return true;
-            }
-        }
+                    return (true, response.Order.Id.ToStringInvariant());
+                });
+                }
 
         /// <summary>
         /// Updates the order with the same id
@@ -1986,7 +1943,7 @@ Interval	Data Available (Open)	Data Available (All)
             public TradierOrderType Type;
             public TradierOrderDuration Duration;
 
-            public TradierPlaceOrderRequest(Order order, TradierOrderClass classification, decimal holdingQuantity, ISymbolMapper symbolMapper)
+            public TradierPlaceOrderRequest(Order order, decimal orderQuantity, TradierOrderClass classification, decimal holdingQuantity, ISymbolMapper symbolMapper)
             {
                 QCOrder = order;
                 Classification = classification;
@@ -2002,7 +1959,7 @@ Interval	Data Available (Open)	Data Available (All)
                 }
 
                 Direction = ConvertDirection(order.Direction, order.SecurityType, holdingQuantity);
-                Quantity = Math.Abs(order.Quantity);
+                Quantity = Math.Abs(orderQuantity);
                 Price = GetLimitPrice(order);
                 Stop = GetStopPrice(order);
                 Type = ConvertOrderType(order);
