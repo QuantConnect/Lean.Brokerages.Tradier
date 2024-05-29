@@ -34,6 +34,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using QuantConnect.Orders.CrossZero;
 using System.Net.NetworkInformation;
 using System.Runtime.Serialization;
 using System.Security.Cryptography;
@@ -94,8 +95,6 @@ namespace QuantConnect.Brokerages.Tradier
 
         // this is used to handle the zero crossing case, when the first order is filled we'll submit the next order
         private readonly ConcurrentDictionary<long, ContingentOrderQueue> _contingentOrdersByQCOrderID = new ConcurrentDictionary<long, ContingentOrderQueue>();
-
-        private readonly ConcurrentDictionary<long, Order> _zeroCrossingOrdersByTradierClosingOrderId = new ConcurrentDictionary<long, Order>();
 
         // this is used to block reentrance when handling contingent orders
         private readonly HashSet<long> _contingentReentranceGuardByQCOrderID = new HashSet<long>();
@@ -803,19 +802,34 @@ Interval	Data Available (Open)	Data Available (All)
                 }
             }
 
-            return TryCrossPoistionOrder(_securityProvider, order,
-                (order, orderQuantity, holdingQuantity) => new TradierPlaceOrderRequest(order, orderQuantity, ConvertSecurityType(order.SecurityType), holdingQuantity, _symbolMapper),
-                (traiderOrder) => traiderOrder.ConvertStopOrderTypes(),
-                (orderRequest) =>
+            var holdingQuantity = _securityProvider.GetHoldingsQuantity(order.Symbol);
+
+            var isPlaceCrossOrder = TryCrossZeroPositionOrder(order, holdingQuantity);
+
+            if (isPlaceCrossOrder == null)
             {
+                var orderRequest = new TradierPlaceOrderRequest(order, order.Quantity, ConvertSecurityType(order.SecurityType), holdingQuantity, order.Type, _symbolMapper);
                 var response = TradierPlaceOrder(orderRequest);
-                    if (!response.Errors.Errors.IsNullOrEmpty())
+                if (response == null || !response.Errors.Errors.IsNullOrEmpty())
                 {
-                        return (false, string.Empty);
+                    return false;
                 }
-                    return (true, response.Order.Id.ToStringInvariant());
-                });
-                }
+                order.BrokerId.Add(response.Order.Id.ToStringInvariant());
+                return true;
+            }
+            return isPlaceCrossOrder.Value;
+        }
+
+        public override CrossZeroOrderResponse PlaceCrossZeroOrder(CrossZeroOrderRequest crossZeroOrderRequest)
+        {
+            var orderRequest = new TradierPlaceOrderRequest(crossZeroOrderRequest.LeanOrder, crossZeroOrderRequest.OrderQuantity, ConvertSecurityType(crossZeroOrderRequest.LeanOrder.SecurityType), crossZeroOrderRequest.OrderQuantityHolding, crossZeroOrderRequest.OrderType, _symbolMapper);
+            var response = TradierPlaceOrder(orderRequest);
+            if (response == null || !response.Errors.Errors.IsNullOrEmpty())
+            {
+                return new CrossZeroOrderResponse(string.Empty, false);
+            }
+            return new CrossZeroOrderResponse(response.Order.Id.ToStringInvariant(), true);
+        }
 
         /// <summary>
         /// Updates the order with the same id
@@ -1243,8 +1257,7 @@ Interval	Data Available (Open)	Data Available (All)
              || ConvertStatus(updatedOrder.Status) != ConvertStatus(cachedOrder.Order.Status))
             {
                 // get original QC order by brokerage id
-                Order qcOrder;
-                if (!_zeroCrossingOrdersByTradierClosingOrderId.TryGetValue(updatedOrder.Id, out qcOrder))
+                if (!_leanOrderByZeroCrossBrokerageOrderId.TryGetValue(updatedOrder.Id.ToStringInvariant(), out var qcOrder))
                 {
                     qcOrder = _orderProvider.GetOrdersByBrokerageId(updatedOrder.Id)?.SingleOrDefault();
                 }
@@ -1281,76 +1294,10 @@ Interval	Data Available (Open)	Data Available (All)
                 }
 
                 // if we filled the order and have another contingent order waiting, submit it
-                if (fill.Status == OrderStatus.Filled)
+                if (!TryHandleRemainingCrossZeroOrder(qcOrder, fill))
                 {
-                    ContingentOrderQueue contingent;
-                    if (_contingentOrdersByQCOrderID.TryGetValue(qcOrder.Id, out contingent))
-                    {
-                        // prevent submitting the contingent order multiple times
-                        if (_contingentReentranceGuardByQCOrderID.Add(qcOrder.Id))
-                        {
-                            var order = contingent.Next();
-                            if (order == null || contingent.Contingents.Count == 0)
-                            {
-                                // we've finished with this contingent order
-                                _contingentOrdersByQCOrderID.TryRemove(qcOrder.Id, out contingent);
-                            }
-                            // fire this off in a task so we don't block this thread
-                            if (order != null)
-                            {
-                                // if we have a contingent that needs to be submitted then we can't respect the 'Filled' state from the order
-                                // because the QC order hasn't been technically filled yet, so mark it as 'PartiallyFilled'
-                                fill.Status = OrderStatus.PartiallyFilled;
-
-                                Task.Run(() =>
-                                {
-                                    try
-                                    {
-                                        Log.Trace("TradierBrokerage.SubmitContingentOrder(): Submitting contingent order for QC id: " + qcOrder.Id);
-
-                                        var response = TradierPlaceOrder(order);
-                                        if (response.Errors.Errors.IsNullOrEmpty())
-                                        {
-                                            // add the new brokerage id for retrieval later
-                                            qcOrder.BrokerId.Add(response.Order.Id.ToStringInvariant());
-                                        }
-                                        else
-                                        {
-                                            // if we failed to place this order I don't know what to do, we've filled the first part
-                                            // and failed to place the second... strange. Should we invalidate the rest of the order??
-                                            Log.Error("TradierBrokerage.SubmitContingentOrder(): Failed to submit contingent order.");
-                                            var message = $"{qcOrder.Symbol} Failed submitting contingent order for " +
-                                                $"QC id: {qcOrder.Id.ToStringInvariant()} Filled " +
-                                                $"Tradier Order id: {updatedOrder.Id.ToStringInvariant()}";
-                                            OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "ContingentOrderFailed", message));
-                                            OnOrderEvent(new OrderEvent(qcOrder, DateTime.UtcNow, orderFee) { Status = OrderStatus.Canceled });
-                                        }
-                                    }
-                                    catch (Exception err)
-                                    {
-                                        Log.Error(err);
-                                        OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "ContingentOrderError", "An error occurred while trying to submit an Tradier contingent order: " + err));
-                                        OnOrderEvent(new OrderEvent(qcOrder, DateTime.UtcNow, orderFee) { Status = OrderStatus.Canceled });
-                                    }
-                                    finally
-                                    {
-                                        _contingentReentranceGuardByQCOrderID.Remove(qcOrder.Id);
-                                    }
-                                });
-                            }
-                        }
-                    }
-
-                    // zero-crossing order completely filled, remove entry
-                    var closingOrderId = _zeroCrossingOrdersByTradierClosingOrderId.FirstOrDefault(x => qcOrder.Id == x.Value.Id).Key;
-                    if (closingOrderId > 0 && closingOrderId != updatedOrder.Id)
-                    {
-                        Order removed;
-                        _zeroCrossingOrdersByTradierClosingOrderId.Remove(closingOrderId, out removed);
-                    }
+                    OnOrderEvent(fill);
                 }
-
-                OnOrderEvent(fill);
             }
 
             // remove from open orders since it's now closed
@@ -1469,7 +1416,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// <summary>
         /// Converts the qc order type into a tradier order type
         /// </summary>
-        protected TradierOrderType ConvertOrderType(OrderType type)
+        protected static TradierOrderType ConvertOrderType(OrderType type)
         {
             switch (type)
             {
@@ -1661,33 +1608,6 @@ Interval	Data Available (Open)	Data Available (All)
                 // This should never happen
                 _ => TradierOrderDirection.None
             };
-        }
-
-        /// <summary>
-        /// Determines whether or not the specified order will bring us across the zero line for holdings
-        /// </summary>
-        protected bool OrderCrossesZero(Order order)
-        {
-            var holdingQuantity = _securityProvider.GetHoldingsQuantity(order.Symbol);
-
-            //We're reducing position or flipping:
-            if (holdingQuantity > 0 && order.Quantity < 0)
-            {
-                if ((holdingQuantity + order.Quantity) < 0)
-                {
-                    //We dont have enough holdings so will cross through zero:
-                    return true;
-                }
-            }
-            else if (holdingQuantity < 0 && order.Quantity > 0)
-            {
-                if ((holdingQuantity + order.Quantity) > 0)
-                {
-                    //Crossed zero: need to split into 2 orders:
-                    return true;
-                }
-            }
-            return false;
         }
 
         /// <summary>
@@ -1943,7 +1863,7 @@ Interval	Data Available (Open)	Data Available (All)
             public TradierOrderType Type;
             public TradierOrderDuration Duration;
 
-            public TradierPlaceOrderRequest(Order order, decimal orderQuantity, TradierOrderClass classification, decimal holdingQuantity, ISymbolMapper symbolMapper)
+            public TradierPlaceOrderRequest(Order order, decimal orderQuantity, TradierOrderClass classification, decimal holdingQuantity, OrderType orderType, ISymbolMapper symbolMapper)
             {
                 QCOrder = order;
                 Classification = classification;
@@ -1962,7 +1882,7 @@ Interval	Data Available (Open)	Data Available (All)
                 Quantity = Math.Abs(orderQuantity);
                 Price = GetLimitPrice(order);
                 Stop = GetStopPrice(order);
-                Type = ConvertOrderType(order);
+                Type = ConvertOrderType(orderType);
                 Duration = GetOrderDuration(order.TimeInForce);
             }
 
