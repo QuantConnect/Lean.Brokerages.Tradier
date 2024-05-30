@@ -820,10 +820,22 @@ Interval	Data Available (Open)	Data Available (All)
             return isPlaceCrossOrder.Value;
         }
 
-        public override CrossZeroOrderResponse PlaceCrossZeroOrder(CrossZeroOrderRequest crossZeroOrderRequest)
+        /// <summary>
+        /// Places an order that crosses zero (transitions from a short position to a long position or vice versa) and returns the response.
+        /// This method implements brokerage-specific logic for placing such orders using Tradier brokerage.
+        /// </summary>
+        /// <param name="crossZeroOrderRequest">The request object containing details of the cross zero order to be placed.</param>
+        /// <param name="isPlaceOrderWithLeanEvent">
+        /// A boolean indicating whether the order should be placed with triggering a Lean event. 
+        /// Default is <c>true</c>, meaning Lean events will be triggered.
+        /// </param>
+        /// <returns>
+        /// A <see cref="CrossZeroOrderResponse"/> object indicating the result of the order placement.
+        /// </returns>
+        public override CrossZeroOrderResponse PlaceCrossZeroOrder(CrossZeroOrderRequest crossZeroOrderRequest, bool isPlaceOrderWithLeanEvent)
         {
             var orderRequest = new TradierPlaceOrderRequest(crossZeroOrderRequest.LeanOrder, crossZeroOrderRequest.OrderQuantity, ConvertSecurityType(crossZeroOrderRequest.LeanOrder.SecurityType), crossZeroOrderRequest.OrderQuantityHolding, crossZeroOrderRequest.OrderType, _symbolMapper);
-            var response = TradierPlaceOrder(orderRequest);
+            var response = TradierPlaceOrder(orderRequest, isPlaceOrderWithLeanEvent);
             if (response == null || !response.Errors.Errors.IsNullOrEmpty())
             {
                 return new CrossZeroOrderResponse(string.Empty, false);
@@ -998,7 +1010,18 @@ Interval	Data Available (Open)	Data Available (All)
             base.OnMessage(message);
         }
 
-        private TradierOrderResponse TradierPlaceOrder(TradierPlaceOrderRequest order)
+        /// <summary>
+        /// Places an order using the Tradier brokerage and returns the response.
+        /// </summary>
+        /// <param name="order">The request object containing details of the order to be placed.</param>
+        /// <param name="isSubmittedEvent">
+        /// A boolean indicating whether a submitted event should be triggered. 
+        /// Default is <c>true</c>, meaning the submitted event will be triggered.
+        /// </param>
+        /// <returns>
+        /// A <see cref="TradierOrderResponse"/> object indicating the result of the order placement.
+        /// </returns>
+        private TradierOrderResponse TradierPlaceOrder(TradierPlaceOrderRequest order, bool isSubmittedEvent = true)
         {
             string stopLimit = string.Empty;
             if (order.Price != 0 || order.Stop != 0)
@@ -1029,8 +1052,12 @@ Interval	Data Available (Open)	Data Available (All)
             {
                 Log.Trace($"TradierBrokerage.TradierPlaceOrder(): order submitted successfully: {response.Order.Id}");
 
-                // send the submitted event
+                if (isSubmittedEvent)
+                {
+                    // If this is not a cross order, send the submitted event to Lean.
+                    // For cross orders, we should not send the submitted event to Lean as they are handled differently.
                 OnOrderEvent(new OrderEvent(order.QCOrder, DateTime.UtcNow, OrderFee.Zero) { Status = OrderStatus.Submitted });
+                }
 
                 // mark this in our open orders before we submit so it's gauranteed to be there when we poll for updates
                 UpdateCachedOpenOrder(response.Order.Id, new TradierOrderDetailed
@@ -1304,7 +1331,8 @@ Interval	Data Available (Open)	Data Available (All)
             if (OrderIsClosed(updatedOrder))
             {
                 _filledTradierOrderIDs.Add(updatedOrder.Id);
-                _cachedOpenOrdersByTradierOrderID.TryRemove(updatedOrder.Id, out cachedOrder);
+                _leanOrderByZeroCrossBrokerageOrderId.TryRemove(updatedOrder.Id.ToStringInvariant(), out _);
+                _cachedOpenOrdersByTradierOrderID.TryRemove(updatedOrder.Id, out _);
             }
         }
 
