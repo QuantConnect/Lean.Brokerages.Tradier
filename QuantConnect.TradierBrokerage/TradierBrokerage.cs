@@ -93,9 +93,6 @@ namespace QuantConnect.Brokerages.Tradier
 
         private readonly FixedSizeHashQueue<long> _filledTradierOrderIDs = new FixedSizeHashQueue<long>(10000);
 
-        // this is used to handle the zero crossing case, when the first order is filled we'll submit the next order
-        private readonly ConcurrentDictionary<long, ContingentOrderQueue> _contingentOrdersByQCOrderID = new ConcurrentDictionary<long, ContingentOrderQueue>();
-
         // this is used to block reentrance when handling contingent orders
         private readonly HashSet<long> _contingentReentranceGuardByQCOrderID = new HashSet<long>();
 
@@ -792,9 +789,6 @@ Interval	Data Available (Open)	Data Available (All)
                         "Tradier Brokerage currently only supports one outstanding order per symbol. Canceled old order: " + qcOrder.Id)
                         );
 
-                    // cancel the open order and clear out any contingents
-                    ContingentOrderQueue contingent;
-                    _contingentOrdersByQCOrderID.TryRemove(qcOrder.Id, out contingent);
                     // don't worry about the response here, if it couldn't be canceled it was
                     // more than likely already filled, either way we'll trust we're clean to proceed
                     // with this new order
@@ -873,24 +867,6 @@ Interval	Data Available (Open)	Data Available (All)
                 return false;
             }
 
-            decimal quantity = activeOrder.Order.Quantity;
-
-            // also sum up the contingent orders
-            ContingentOrderQueue contingent;
-            if (_contingentOrdersByQCOrderID.TryGetValue(order.Id, out contingent))
-            {
-                quantity = contingent.QCOrder.AbsoluteQuantity;
-            }
-
-            if (quantity != order.AbsoluteQuantity)
-            {
-                Log.Trace("TradierBrokerage.UpdateOrder(): Unable to update order quantity.");
-                OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "UpdateRejected", "Unable to modify Tradier order quantities."));
-                return false;
-            }
-
-            // we only want to update the active order, and if successful, we'll update contingents as well in memory
-
             var orderType = ConvertOrderType(order.Type);
             var orderDuration = GetOrderDuration(order.TimeInForce);
             var limitPrice = GetLimitPrice(order);
@@ -913,19 +889,6 @@ Interval	Data Available (Open)	Data Available (All)
             OnOrderEvent(new OrderEvent(order, DateTime.UtcNow, OrderFee.Zero)
             { Status = OrderStatus.UpdateSubmitted });
 
-            // if we have contingents, update them as well
-            if (contingent != null)
-            {
-                foreach (var orderRequest in contingent.Contingents)
-                {
-                    orderRequest.Type = orderType;
-                    orderRequest.Duration = orderDuration;
-                    orderRequest.Price = limitPrice;
-                    orderRequest.Stop = stopPrice;
-                    orderRequest.ConvertStopOrderTypes();
-                }
-            }
-
             return true;
         }
 
@@ -943,10 +906,6 @@ Interval	Data Available (Open)	Data Available (All)
                 Log.Trace("TradierBrokerage.CancelOrder(): Unable to cancel order without BrokerId.");
                 return false;
             }
-
-            // remove any contingent orders
-            ContingentOrderQueue contingent;
-            _contingentOrdersByQCOrderID.TryRemove(order.Id, out contingent);
 
             // add this id to the cancelled list, this is to prevent resubmits of certain simulated order
             // types, such as market on close
