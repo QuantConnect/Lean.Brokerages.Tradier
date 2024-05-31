@@ -832,7 +832,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// <returns>
         /// A <see cref="CrossZeroOrderResponse"/> object indicating the result of the order placement.
         /// </returns>
-        public override CrossZeroOrderResponse PlaceCrossZeroOrder(CrossZeroOrderRequest crossZeroOrderRequest, bool isPlaceOrderWithLeanEvent)
+        protected override CrossZeroOrderResponse PlaceCrossZeroOrder(CrossZeroOrderRequest crossZeroOrderRequest, bool isPlaceOrderWithLeanEvent)
         {
             var orderRequest = new TradierPlaceOrderRequest(crossZeroOrderRequest.LeanOrder, crossZeroOrderRequest.OrderQuantity, ConvertSecurityType(crossZeroOrderRequest.LeanOrder.SecurityType), crossZeroOrderRequest.OrderQuantityHolding, crossZeroOrderRequest.OrderType, _symbolMapper);
             var response = TradierPlaceOrder(orderRequest, isPlaceOrderWithLeanEvent);
