@@ -1243,7 +1243,7 @@ Interval	Data Available (Open)	Data Available (All)
              || ConvertStatus(updatedOrder.Status) != ConvertStatus(cachedOrder.Order.Status))
             {
                 // get original QC order by brokerage id
-                if (!_leanOrderByZeroCrossBrokerageOrderId.TryGetValue(updatedOrder.Id.ToStringInvariant(), out var qcOrder))
+                if (!LeanOrderByZeroCrossBrokerageOrderId.TryGetValue(updatedOrder.Id.ToStringInvariant(), out var qcOrder))
                 {
                     qcOrder = _orderProvider.GetOrdersByBrokerageId(updatedOrder.Id)?.SingleOrDefault();
                 }
@@ -1290,7 +1290,7 @@ Interval	Data Available (Open)	Data Available (All)
             if (OrderIsClosed(updatedOrder))
             {
                 _filledTradierOrderIDs.Add(updatedOrder.Id);
-                _leanOrderByZeroCrossBrokerageOrderId.TryRemove(updatedOrder.Id.ToStringInvariant(), out _);
+                LeanOrderByZeroCrossBrokerageOrderId.TryRemove(updatedOrder.Id.ToStringInvariant(), out _);
                 _cachedOpenOrdersByTradierOrderID.TryRemove(updatedOrder.Id, out _);
             }
         }
