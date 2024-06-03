@@ -1242,8 +1242,9 @@ Interval	Data Available (Open)	Data Available (All)
             if (updatedOrder.RemainingQuantity != cachedOrder.Order.RemainingQuantity
              || ConvertStatus(updatedOrder.Status) != ConvertStatus(cachedOrder.Order.Status))
             {
+                var leanOrderStatus = ConvertStatus(updatedOrder.Status);
                 // get original QC order by brokerage id
-                if (!LeanOrderByZeroCrossBrokerageOrderId.TryGetValue(updatedOrder.Id.ToStringInvariant(), out var qcOrder))
+                if (!TryGetOrRemoveCrossZeroOrder(updatedOrder.Id.ToStringInvariant(), leanOrderStatus == OrderStatus.Filled, out var qcOrder))
                 {
                     qcOrder = _orderProvider.GetOrdersByBrokerageId(updatedOrder.Id)?.SingleOrDefault();
                 }
@@ -1256,7 +1257,7 @@ Interval	Data Available (Open)	Data Available (All)
                 var orderFee = OrderFee.Zero;
                 var fill = new OrderEvent(qcOrder, DateTime.UtcNow, orderFee, "Tradier Fill Event")
                 {
-                    Status = ConvertStatus(updatedOrder.Status),
+                    Status = leanOrderStatus,
                     // this is guaranteed to be wrong in the event we have multiple fills within our polling interval,
                     // we're able to partially cope with the fill quantity by diffing the previous info vs current info
                     // but the fill price will always be the most recent fill, so if we have two fills with 1/10 of a second
