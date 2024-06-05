@@ -99,7 +99,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         }
 
         [TestCase("VXX190517P00016000", true)]
-        [TestCase("AAPL231222C00200000", false)]
+        [TestCase("AAPL240607C00100000", false)]
         public void GetQuotesDoesNotReturnNull(string contract, bool isEmpty)
         {
             var tradier = (TradierBrokerage) Brokerage;
