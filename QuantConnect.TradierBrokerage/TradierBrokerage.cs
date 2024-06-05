@@ -1291,7 +1291,6 @@ Interval	Data Available (Open)	Data Available (All)
             if (OrderIsClosed(updatedOrder))
             {
                 _filledTradierOrderIDs.Add(updatedOrder.Id);
-                LeanOrderByZeroCrossBrokerageOrderId.TryRemove(updatedOrder.Id.ToStringInvariant(), out _);
                 _cachedOpenOrdersByTradierOrderID.TryRemove(updatedOrder.Id, out _);
             }
         }
