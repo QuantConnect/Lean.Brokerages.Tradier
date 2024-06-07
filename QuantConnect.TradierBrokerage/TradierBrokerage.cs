@@ -853,6 +853,12 @@ Interval	Data Available (Open)	Data Available (All)
                 return false;
             }
 
+            if (!IsPossibleUpdateCrossZeroOrder(order))
+            {
+                OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, -1, "TradierBrokerage.UpdateOrder(): Unable to modify order quantities."));
+                return false;
+            }
+
             // there's only one active tradier order per qc order, find it
             var activeOrder = (
                 from brokerId in order.BrokerId
