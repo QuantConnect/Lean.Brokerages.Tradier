@@ -853,7 +853,7 @@ Interval	Data Available (Open)	Data Available (All)
                 return false;
             }
 
-            if (!IsPossibleUpdateCrossZeroOrder(order))
+            if (!IsPossibleUpdateCrossZeroOrder(order, out _))
             {
                 OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, -1, "TradierBrokerage.UpdateOrder(): Unable to modify order quantities."));
                 return false;
