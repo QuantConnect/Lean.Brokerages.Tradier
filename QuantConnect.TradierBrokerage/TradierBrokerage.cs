@@ -1250,7 +1250,7 @@ Interval	Data Available (Open)	Data Available (All)
             {
                 var leanOrderStatus = ConvertStatus(updatedOrder.Status);
                 // get original QC order by brokerage id
-                if (!TryGetOrRemoveCrossZeroOrder(updatedOrder.Id.ToStringInvariant(), leanOrderStatus == OrderStatus.Filled, out var qcOrder))
+                if (!TryGetOrRemoveCrossZeroOrder(updatedOrder.Id.ToStringInvariant(), leanOrderStatus, out var qcOrder))
                 {
                     qcOrder = _orderProvider.GetOrdersByBrokerageId(updatedOrder.Id)?.SingleOrDefault();
                 }
