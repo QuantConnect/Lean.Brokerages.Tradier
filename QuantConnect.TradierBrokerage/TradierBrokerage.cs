@@ -34,7 +34,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
-using QuantConnect.Orders.CrossZero;
+using QuantConnect.Brokerages.CrossZero;
 using System.Net.NetworkInformation;
 using System.Runtime.Serialization;
 using System.Security.Cryptography;
@@ -826,7 +826,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// <returns>
         /// A <see cref="CrossZeroOrderResponse"/> object indicating the result of the order placement.
         /// </returns>
-        protected override CrossZeroOrderResponse PlaceCrossZeroOrder(CrossZeroOrderRequest crossZeroOrderRequest, bool isPlaceOrderWithLeanEvent)
+        protected override CrossZeroOrderResponse PlaceCrossZeroOrder(CrossZeroFirstOrderRequest crossZeroOrderRequest, bool isPlaceOrderWithLeanEvent)
         {
             var orderRequest = new TradierPlaceOrderRequest(crossZeroOrderRequest.LeanOrder, crossZeroOrderRequest.OrderQuantity, ConvertSecurityType(crossZeroOrderRequest.LeanOrder.SecurityType), crossZeroOrderRequest.OrderQuantityHolding, crossZeroOrderRequest.OrderType, _symbolMapper);
             var response = TradierPlaceOrder(orderRequest, isPlaceOrderWithLeanEvent);
@@ -853,7 +853,7 @@ Interval	Data Available (Open)	Data Available (All)
                 return false;
             }
 
-            if (!IsPossibleUpdateCrossZeroOrder(order, out _))
+            if (!TryGetUpdateCrossZeroOrderQuantity(order, out _))
             {
                 OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, -1, "TradierBrokerage.UpdateOrder(): Unable to modify order quantities."));
                 return false;
