@@ -99,7 +99,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         }
 
         [TestCase("VXX190517P00016000", true)]
-        [TestCase("AAPL231222C00200000", false)]
+        [TestCase("AAPL240607C00100000", false)]
         public void GetQuotesDoesNotReturnNull(string contract, bool isEmpty)
         {
             var tradier = (TradierBrokerage) Brokerage;
@@ -316,6 +316,44 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         public override void LongFromShort(OrderTestParameters parameters)
         {
             base.LongFromShort(parameters);
+        }
+
+        /// <summary>
+        /// Tests the scenario where a market order transitions from a short position to a long position,
+        /// crossing zero in the process. This test ensures the order status change events occur in the expected
+        /// sequence: Submitted, PartiallyFilled, and Filled.
+        /// 
+        /// The method performs the following steps:
+        /// <list type="number">
+        /// <item>Creates a market order for the AAPL symbol with a TimeInForce property set to Day.</item>
+        /// <item>Places a short market order to establish a short position of at least -1 quantity.</item>
+        /// <item>Subscribes to the order status change events and records the status changes.</item>
+        /// <item>Places a long market order that crosses zero, effectively transitioning from short to long.</item>
+        /// <item>Asserts that the order is not null, has a BrokerId, and the status change events match the expected sequence.</item>
+        /// </list>
+        /// </summary>
+        /// <param name="longQuantityMultiplayer">The multiplier for the long order quantity, relative to the default quantity.</param>
+        [TestCase(4)]
+        public void MarketCrossZeroLongFromShort(decimal longQuantityMultiplayer)
+        {
+            var expectedOrderStatusChangedOrdering = new[] { OrderStatus.Submitted, OrderStatus.PartiallyFilled, OrderStatus.Filled };
+            var actualCrossZeroOrderStatusOrdering = new Queue<OrderStatus>();
+
+            // create market order to holding something
+            var marketOrder = new MarketOrderTestParameters(Symbols.AAPL, properties: new OrderProperties() { TimeInForce = TimeInForce.Day });
+
+            // place short position to holding at least -1 quantity to run of cross zero order
+            PlaceOrderWaitForStatus(marketOrder.CreateShortMarketOrder(-GetDefaultQuantity()), OrderStatus.Filled);
+
+            // validate ordering of order status change events
+            Brokerage.OrdersStatusChanged += (_, orderEvents) => actualCrossZeroOrderStatusOrdering.Enqueue(orderEvents[0].Status);
+
+            // Place Order with crossZero processing
+            var order = PlaceOrderWaitForStatus(marketOrder.CreateLongOrder(longQuantityMultiplayer * GetDefaultQuantity()), OrderStatus.Filled);
+
+            Assert.IsNotNull(order);
+            Assert.Greater(order.BrokerId.Count, 0);
+            CollectionAssert.AreEquivalent(expectedOrderStatusChangedOrdering, actualCrossZeroOrderStatusOrdering);
         }
     }
 }
