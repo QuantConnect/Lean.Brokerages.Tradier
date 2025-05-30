@@ -322,7 +322,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         /// Tests the scenario where a market order transitions from a short position to a long position,
         /// crossing zero in the process. This test ensures the order status change events occur in the expected
         /// sequence: Submitted, PartiallyFilled, and Filled.
-        /// 
+        ///
         /// The method performs the following steps:
         /// <list type="number">
         /// <item>Creates a market order for the AAPL symbol with a TimeInForce property set to Day.</item>
@@ -354,6 +354,40 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.IsNotNull(order);
             Assert.Greater(order.BrokerId.Count, 0);
             CollectionAssert.AreEquivalent(expectedOrderStatusChangedOrdering, actualCrossZeroOrderStatusOrdering);
+        }
+
+        private static IEnumerable<TestCaseData> OrdersOutsideRegularHoursTestCases
+        {
+            get
+            {
+                var equity = Symbol.Create("AAPL", SecurityType.Equity, Market.USA);
+                var orderProperties = new TradierOrderProperties() { OutsideRegularTradingHours = true, TimeInForce = TimeInForce.Day };
+                // Pre/Post orders are only allowed for limit orders, so the fetched open order will have OutsideRegularTradingHours set to false
+                yield return new TestCaseData(new StopMarketOrderTestParameters(equity, 250m, 150m, orderProperties), false);
+
+                var option = Symbol.CreateOption(equity, Market.USA, OptionStyle.American, OptionRight.Call, 195m, new DateTime(2025, 06, 20));
+                // Pre/Post orders are only allowed for equities, so the fetched open order will have OutsideRegularTradingHours set to false
+                yield return new TestCaseData(new LimitOrderTestParameters(option, 250m, 150m, orderProperties), false);
+
+                // Pre/Post orders are only allowed for equities limit orders, so the fetched open order will have OutsideRegularTradingHours set to true
+                yield return new TestCaseData(new LimitOrderTestParameters(equity, 250m, 150m, orderProperties), true);
+            }
+        }
+
+        [TestCaseSource(nameof(OrdersOutsideRegularHoursTestCases))]
+        [Explicit("Must be ran during extended sessions")]
+        public void PlaceOrderOutsideRegularMarketHours(OrderTestParameters orderParameters, bool shouldBeOutsideRegularHours)
+        {
+            var orderToPlace = orderParameters.CreateShortOrder(-1);
+            PlaceOrderWaitForStatus(orderToPlace, OrderStatus.Submitted);
+
+            var order = Brokerage.GetOpenOrders().SingleOrDefault();
+            Assert.IsNotNull(order);
+            Assert.IsInstanceOf(orderToPlace.GetType(), order);
+
+            var orderProperties = order.Properties as TradierOrderProperties;
+            Assert.IsNotNull(orderProperties);
+            Assert.AreEqual(shouldBeOutsideRegularHours, orderProperties.OutsideRegularTradingHours);
         }
     }
 }
