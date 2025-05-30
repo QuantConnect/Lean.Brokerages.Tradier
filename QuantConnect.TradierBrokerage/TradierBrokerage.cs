@@ -1283,6 +1283,11 @@ Interval	Data Available (Open)	Data Available (All)
                     FillQuantity = (int)(updatedOrder.QuantityExecuted - cachedOrder.Order.QuantityExecuted)
                 };
 
+                if (!string.IsNullOrEmpty(updatedOrder.ReasonDescription))
+                {
+                    fill.Message = updatedOrder.ReasonDescription;
+                }
+
                 // flip the quantity on sell actions
                 if (IsShort(updatedOrder.Direction))
                 {
