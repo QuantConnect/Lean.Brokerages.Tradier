@@ -819,7 +819,6 @@ Interval	Data Available (Open)	Data Available (All)
                 {
                     return false;
                 }
-                order.BrokerId.Add(response.Order.Id.ToStringInvariant());
                 return true;
             }
             return isPlaceCrossOrder.Value;
@@ -1027,6 +1026,8 @@ Interval	Data Available (Open)	Data Available (All)
             if (response != null && response.Errors.Errors.IsNullOrEmpty())
             {
                 Log.Trace($"TradierBrokerage.TradierPlaceOrder(): order submitted successfully: {response.Order.Id}");
+
+                order.QCOrder.BrokerId.Add(response.Order.Id.ToStringInvariant());
 
                 if (isSubmittedEvent)
                 {
