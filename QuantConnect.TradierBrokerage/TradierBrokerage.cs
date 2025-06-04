@@ -511,10 +511,10 @@ namespace QuantConnect.Brokerages.Tradier
             // ref https://documentation.tradier.com/brokerage-api/markets/get-timesales
             /*
 Interval	Data Available (Open)	Data Available (All)
-	tick	5 days					N/A
-	1min	20 days					10 days
-	5min	40 days					18 days
-	15min	40 days					18 days
+    tick	5 days					N/A
+    1min	20 days					10 days
+    5min	40 days					18 days
+    15min	40 days					18 days
              */
             TimeSpan maximumTimeAgo;
             if (interval == TradierTimeSeriesIntervals.FifteenMinutes || interval == TradierTimeSeriesIntervals.FiveMinutes)
@@ -1033,7 +1033,7 @@ Interval	Data Available (Open)	Data Available (All)
                 {
                     // If this is not a cross order, send the submitted event to Lean.
                     // For cross orders, we should not send the submitted event to Lean as they are handled differently.
-                OnOrderEvent(new OrderEvent(order.QCOrder, DateTime.UtcNow, OrderFee.Zero) { Status = OrderStatus.Submitted });
+                    OnOrderEvent(new OrderEvent(order.QCOrder, DateTime.UtcNow, OrderFee.Zero) { Status = OrderStatus.Submitted });
                 }
 
                 // mark this in our open orders before we submit so it's gauranteed to be there when we poll for updates
@@ -1632,9 +1632,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// </summary>
         protected static TradierOrderDuration GetOrderDuration(Order order, ISecurityProvider securityProvider)
         {
-            var outsideRegularMarketHours = (order.Properties as TradierOrderProperties)?.OutsideRegularTradingHours ?? false;
-            // Trading outside regular hours is only supported for equities limit orders
-            if (outsideRegularMarketHours && order.Symbol.SecurityType == SecurityType.Equity && order.Type == OrderType.Limit)
+            if ((order.Properties as TradierOrderProperties)?.OutsideRegularTradingHours ?? false)
             {
                 var exchangeTimeZone = securityProvider.GetSecurity(order.Symbol).Exchange.TimeZone;
                 var now = DateTime.UtcNow.ConvertFromUtc(exchangeTimeZone);
