@@ -201,6 +201,16 @@ namespace QuantConnect.Brokerages.Tradier
                         return default(T);
                     }
 
+                    // this happens when we placing a pre/post market limit order outsite the actual pre/post market segments.
+                    // e.g.: Invalid parameter, duration: pre market no longer available
+                    if (raw.Content.Contains("Invalid parameter,"))
+                    {
+                        OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "NotExtendedMarketSegment",
+                            $"Unable to place Pre/Post market hours order outside a Pre/Post market segment: {raw.Content}"
+                        ));
+                        return default(T);
+                    }
+
                     // this happens when a request for historical data should return an empty response
                     if (type == TradierApiRequestType.Data && rootName == "series")
                     {
