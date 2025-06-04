@@ -91,7 +91,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             }
 
             _brokerage = new TradierBrokerage(null, null, null, null, _useSandbox, _accountId, _accessToken);
-            _chainProvider = new CachingOptionChainProvider(new LiveOptionChainProvider(TestGlobals.DataCacheProvider, TestGlobals.MapFileProvider));
+            _chainProvider = new CachingOptionChainProvider(new LiveOptionChainProvider());
         }
 
         [OneTimeTearDown]

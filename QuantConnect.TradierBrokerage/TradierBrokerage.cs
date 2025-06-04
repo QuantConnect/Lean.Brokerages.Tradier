@@ -55,6 +55,17 @@ namespace QuantConnect.Brokerages.Tradier
     [BrokerageFactory(typeof(TradierBrokerageFactory))]
     public partial class TradierBrokerage : BaseWebsocketsBrokerage, IDataQueueHandler, IDataQueueUniverseProvider
     {
+        // Pre/Post market sessions: https://documentation.tradier.com/brokerage-api/trading/getting-started
+        // See section "Pre/Post Market Sessions"
+        private static readonly MarketHoursSegment PreMarketSession = new MarketHoursSegment(
+            MarketHoursState.PreMarket,
+            new TimeSpan(4, 0, 0),
+            new TimeSpan(9, 24, 0));
+        private static readonly MarketHoursSegment PostMarketSession = new MarketHoursSegment(
+            MarketHoursState.PostMarket,
+            new TimeSpan(16, 0, 0),
+            new TimeSpan(19, 55, 0));
+
         private bool _useSandbox;
         private string _accountId;
 
@@ -187,6 +198,16 @@ namespace QuantConnect.Brokerages.Tradier
                                 "Unable to cancel the order because it has already been filled or cancelled. TradierOrderId: " + orderId
                             ));
                         }
+                        return default(T);
+                    }
+
+                    // this happens when we placing a pre/post market limit order outsite the actual pre/post market segments.
+                    // e.g.: Invalid parameter, duration: pre market no longer available
+                    if (raw.Content.Contains("Invalid parameter, duration:"))
+                    {
+                        OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "NotExtendedMarketSegment",
+                            $"Unable to place Pre/Post market hours order outside a Pre/Post market segment: {raw.Content}"
+                        ));
                         return default(T);
                     }
 
@@ -500,10 +521,10 @@ namespace QuantConnect.Brokerages.Tradier
             // ref https://documentation.tradier.com/brokerage-api/markets/get-timesales
             /*
 Interval	Data Available (Open)	Data Available (All)
-	tick	5 days					N/A
-	1min	20 days					10 days
-	5min	40 days					18 days
-	15min	40 days					18 days
+    tick	5 days					N/A
+    1min	20 days					10 days
+    5min	40 days					18 days
+    15min	40 days					18 days
              */
             TimeSpan maximumTimeAgo;
             if (interval == TradierTimeSeriesIntervals.FifteenMinutes || interval == TradierTimeSeriesIntervals.FiveMinutes)
@@ -802,13 +823,12 @@ Interval	Data Available (Open)	Data Available (All)
 
             if (isPlaceCrossOrder == null)
             {
-                var orderRequest = new TradierPlaceOrderRequest(order, order.Quantity, ConvertSecurityType(order.SecurityType), holdingQuantity, order.Type, _symbolMapper);
+                var orderRequest = new TradierPlaceOrderRequest(order, order.Quantity, ConvertSecurityType(order.SecurityType), holdingQuantity, order.Type, _symbolMapper, _securityProvider);
                 var response = TradierPlaceOrder(orderRequest);
                 if (response == null || !response.Errors.Errors.IsNullOrEmpty())
                 {
                     return false;
                 }
-                order.BrokerId.Add(response.Order.Id.ToStringInvariant());
                 return true;
             }
             return isPlaceCrossOrder.Value;
@@ -820,7 +840,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// </summary>
         /// <param name="crossZeroOrderRequest">The request object containing details of the cross zero order to be placed.</param>
         /// <param name="isPlaceOrderWithLeanEvent">
-        /// A boolean indicating whether the order should be placed with triggering a Lean event. 
+        /// A boolean indicating whether the order should be placed with triggering a Lean event.
         /// Default is <c>true</c>, meaning Lean events will be triggered.
         /// </param>
         /// <returns>
@@ -828,7 +848,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// </returns>
         protected override CrossZeroOrderResponse PlaceCrossZeroOrder(CrossZeroFirstOrderRequest crossZeroOrderRequest, bool isPlaceOrderWithLeanEvent)
         {
-            var orderRequest = new TradierPlaceOrderRequest(crossZeroOrderRequest.LeanOrder, crossZeroOrderRequest.OrderQuantity, ConvertSecurityType(crossZeroOrderRequest.LeanOrder.SecurityType), crossZeroOrderRequest.OrderQuantityHolding, crossZeroOrderRequest.OrderType, _symbolMapper);
+            var orderRequest = new TradierPlaceOrderRequest(crossZeroOrderRequest.LeanOrder, crossZeroOrderRequest.OrderQuantity, ConvertSecurityType(crossZeroOrderRequest.LeanOrder.SecurityType), crossZeroOrderRequest.OrderQuantityHolding, crossZeroOrderRequest.OrderType, _symbolMapper, _securityProvider);
             var response = TradierPlaceOrder(orderRequest, isPlaceOrderWithLeanEvent);
             if (response == null || !response.Errors.Errors.IsNullOrEmpty())
             {
@@ -874,7 +894,7 @@ Interval	Data Available (Open)	Data Available (All)
             }
 
             var orderType = ConvertOrderType(order.Type);
-            var orderDuration = GetOrderDuration(order.TimeInForce);
+            var orderDuration = GetOrderDuration(order, _securityProvider);
             var limitPrice = GetLimitPrice(order);
             var stopPrice = GetStopPrice(order);
             var response = ChangeOrder(activeOrder.Order.Id,
@@ -980,7 +1000,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// </summary>
         /// <param name="order">The request object containing details of the order to be placed.</param>
         /// <param name="isSubmittedEvent">
-        /// A boolean indicating whether a submitted event should be triggered. 
+        /// A boolean indicating whether a submitted event should be triggered.
         /// Default is <c>true</c>, meaning the submitted event will be triggered.
         /// </param>
         /// <returns>
@@ -1017,11 +1037,13 @@ Interval	Data Available (Open)	Data Available (All)
             {
                 Log.Trace($"TradierBrokerage.TradierPlaceOrder(): order submitted successfully: {response.Order.Id}");
 
+                order.QCOrder.BrokerId.Add(response.Order.Id.ToStringInvariant());
+
                 if (isSubmittedEvent)
                 {
                     // If this is not a cross order, send the submitted event to Lean.
                     // For cross orders, we should not send the submitted event to Lean as they are handled differently.
-                OnOrderEvent(new OrderEvent(order.QCOrder, DateTime.UtcNow, OrderFee.Zero) { Status = OrderStatus.Submitted });
+                    OnOrderEvent(new OrderEvent(order.QCOrder, DateTime.UtcNow, OrderFee.Zero) { Status = OrderStatus.Submitted });
                 }
 
                 // mark this in our open orders before we submit so it's gauranteed to be there when we poll for updates
@@ -1272,6 +1294,11 @@ Interval	Data Available (Open)	Data Available (All)
                     FillQuantity = (int)(updatedOrder.QuantityExecuted - cachedOrder.Order.QuantityExecuted)
                 };
 
+                if (!string.IsNullOrEmpty(updatedOrder.ReasonDescription))
+                {
+                    fill.Message = updatedOrder.ReasonDescription;
+                }
+
                 // flip the quantity on sell actions
                 if (IsShort(updatedOrder.Direction))
                 {
@@ -1373,23 +1400,28 @@ Interval	Data Available (Open)	Data Available (All)
             var symbol = _symbolMapper.GetLeanSymbol(order.Class == TradierOrderClass.Option ? order.OptionSymbol : order.Symbol);
             var quantity = ConvertQuantity(order);
             var time = order.TransactionDate;
+            var properties = new TradierOrderProperties();
 
             switch (order.Type)
             {
                 case TradierOrderType.Limit:
-                    qcOrder = new LimitOrder(symbol, quantity, order.Price, time);
+                    qcOrder = new LimitOrder(symbol, quantity, order.Price, time, properties: properties);
+                    if (order.Duration == TradierOrderDuration.Pre || order.Duration == TradierOrderDuration.Post)
+                    {
+                        properties.OutsideRegularTradingHours = true;
+                    }
                     break;
 
                 case TradierOrderType.Market:
-                    qcOrder = new MarketOrder(symbol, quantity, time);
+                    qcOrder = new MarketOrder(symbol, quantity, time, properties: properties);
                     break;
 
                 case TradierOrderType.StopMarket:
-                    qcOrder = new StopMarketOrder(symbol, quantity, GetOrder(order.Id).StopPrice, time);
+                    qcOrder = new StopMarketOrder(symbol, quantity, GetOrder(order.Id).StopPrice, time, properties: properties);
                     break;
 
                 case TradierOrderType.StopLimit:
-                    qcOrder = new StopLimitOrder(symbol, quantity, GetOrder(order.Id).StopPrice, order.Price, time);
+                    qcOrder = new StopLimitOrder(symbol, quantity, GetOrder(order.Id).StopPrice, order.Price, time, properties: properties);
                     break;
 
                 //case TradierOrderType.Credit:
@@ -1441,6 +1473,8 @@ Interval	Data Available (Open)	Data Available (All)
                     return TimeInForce.GoodTilCanceled;
 
                 case TradierOrderDuration.Day:
+                case TradierOrderDuration.Pre:
+                case TradierOrderDuration.Post:
                     return TimeInForce.Day;
 
                 default:
@@ -1606,14 +1640,30 @@ Interval	Data Available (Open)	Data Available (All)
         /// <summary>
         /// Converts the qc order duration into a tradier order duration
         /// </summary>
-        protected static TradierOrderDuration GetOrderDuration(TimeInForce timeInForce)
+        protected static TradierOrderDuration GetOrderDuration(Order order, ISecurityProvider securityProvider)
         {
-            if (timeInForce is GoodTilCanceledTimeInForce)
+            if ((order.Properties as TradierOrderProperties)?.OutsideRegularTradingHours ?? false)
+            {
+                var exchangeTimeZone = securityProvider.GetSecurity(order.Symbol).Exchange.TimeZone;
+                var now = DateTime.UtcNow.ConvertFromUtc(exchangeTimeZone);
+
+                if (PreMarketSession.Contains(now.TimeOfDay))
+                {
+                    return TradierOrderDuration.Pre;
+                }
+
+                if (PostMarketSession.Contains(now.TimeOfDay))
+                {
+                    return TradierOrderDuration.Post;
+                }
+            }
+
+            if (order.TimeInForce is GoodTilCanceledTimeInForce)
             {
                 return TradierOrderDuration.GTC;
             }
 
-            if (timeInForce is DayTimeInForce)
+            if (order.TimeInForce is DayTimeInForce)
             {
                 return TradierOrderDuration.Day;
             }
@@ -1856,7 +1906,7 @@ Interval	Data Available (Open)	Data Available (All)
             public TradierOrderType Type;
             public TradierOrderDuration Duration;
 
-            public TradierPlaceOrderRequest(Order order, decimal orderQuantity, TradierOrderClass classification, decimal holdingQuantity, OrderType orderType, ISymbolMapper symbolMapper)
+            public TradierPlaceOrderRequest(Order order, decimal orderQuantity, TradierOrderClass classification, decimal holdingQuantity, OrderType orderType, ISymbolMapper symbolMapper, ISecurityProvider securityProvider)
             {
                 QCOrder = order;
                 Classification = classification;
@@ -1876,7 +1926,7 @@ Interval	Data Available (Open)	Data Available (All)
                 Price = GetLimitPrice(order);
                 Stop = GetStopPrice(order);
                 Type = ConvertOrderType(orderType);
-                Duration = GetOrderDuration(order.TimeInForce);
+                Duration = GetOrderDuration(order, securityProvider);
             }
 
             public void ConvertStopOrderTypes()

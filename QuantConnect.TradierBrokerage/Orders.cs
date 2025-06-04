@@ -132,6 +132,10 @@ namespace QuantConnect.Brokerages.Tradier
         [JsonProperty(PropertyName = "leg")]
         public List<TradierOrderLeg> Legs;
 
+        /// Reason description.
+        [JsonProperty(PropertyName = "reason_description")]
+        public string ReasonDescription;
+
         /// Closed position trade summary
         public TradierOrder()
         { }
