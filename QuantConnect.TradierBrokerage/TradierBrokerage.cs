@@ -203,7 +203,7 @@ namespace QuantConnect.Brokerages.Tradier
 
                     // this happens when we placing a pre/post market limit order outsite the actual pre/post market segments.
                     // e.g.: Invalid parameter, duration: pre market no longer available
-                    if (raw.Content.Contains("Invalid parameter,"))
+                    if (raw.Content.Contains("Invalid parameter, duration:"))
                     {
                         OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "NotExtendedMarketSegment",
                             $"Unable to place Pre/Post market hours order outside a Pre/Post market segment: {raw.Content}"
