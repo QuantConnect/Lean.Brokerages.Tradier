@@ -1,4 +1,7 @@
 {
+	"name" : "Tradier",
+	"logo-url" : "https://cdn.quantconnect.com/i/tu/tradier-brokerage-logo.png",
+	"min-deposit" : "None",
 	"description": "Tradier is a reliable low-cost Equities and Equity-Options REST-API brokerage. They have plans to select $0-fee trading on equities and options.",
 	"platforms-features":[
 		{
