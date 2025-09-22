@@ -74,7 +74,7 @@ namespace QuantConnect.Brokerages.Tradier
             new EquityExchange(MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, null, SecurityType.Equity));
 
         private readonly SymbolPropertiesDatabase _symbolPropertiesDatabase = SymbolPropertiesDatabase.FromDataFolder();
-        private readonly TradierSymbolMapper _symbolMapper = new TradierSymbolMapper();
+        private TradierSymbolMapper _symbolMapper;
 
         private string _previousResponseRaw = "";
         private readonly object _lockAccessCredentials = new object();
@@ -1817,6 +1817,9 @@ Interval	Data Available (Open)	Data Available (All)
                 }
             };
             ValidateSubscription();
+            
+            // Initialize the symbol mapper with the GetQuotes delegate
+            _symbolMapper = new TradierSymbolMapper(GetQuotes);
 
             _subscribeThead = new Thread(() =>
             {
