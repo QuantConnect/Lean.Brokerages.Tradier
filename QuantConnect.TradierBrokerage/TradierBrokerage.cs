@@ -512,6 +512,17 @@ namespace QuantConnect.Brokerages.Tradier
         }
 
         /// <summary>
+        /// Gets a single quote for the specified symbol.
+        /// </summary>
+        /// <param name="symbol">The symbol to get a quote for</param>
+        /// <returns>The quote for the symbol, or null if not found</returns>
+        public TradierQuote GetQuote(string symbol)
+        {
+            var quotes = GetQuotes(new List<string> { symbol });
+            return quotes?.FirstOrDefault();
+        }
+
+        /// <summary>
         /// Get the historical bars for this period
         /// </summary>
         private IEnumerable<TradierTimeSeries> GetTimeSeries(HistoryRequest historyRequest, DateTime start, DateTime end, TradierTimeSeriesIntervals interval)
@@ -1818,8 +1829,8 @@ Interval	Data Available (Open)	Data Available (All)
             };
             ValidateSubscription();
             
-            // Initialize the symbol mapper with the GetQuotes delegate
-            _symbolMapper = new TradierSymbolMapper(GetQuotes);
+            // Initialize the symbol mapper with the GetQuote function
+            _symbolMapper = new TradierSymbolMapper(GetQuote);
 
             _subscribeThead = new Thread(() =>
             {

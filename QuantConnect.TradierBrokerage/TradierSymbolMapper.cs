@@ -28,7 +28,10 @@ namespace QuantConnect.Brokerages.Tradier
     /// </summary>
     public class TradierSymbolMapper : ISymbolMapper
     {
-        private readonly Func<List<string>, List<TradierQuote>> _getQuotesDelegate;
+        /// <summary>
+        /// Function to retrieve a single quote for a given symbol from the brokerage API.
+        /// </summary>
+        private readonly Func<string, TradierQuote> _getQuoteFunction;
 
         public static readonly FrozenSet<SecurityType> SupportedOptionTypes =
         [
@@ -49,10 +52,10 @@ namespace QuantConnect.Brokerages.Tradier
         /// <summary>
         /// Initializes a new instance of the TradierSymbolMapper class.
         /// </summary>
-        /// <param name="getQuotesDelegate">Delegate to get quotes for symbols.</param>
-        public TradierSymbolMapper(Func<List<string>, List<TradierQuote>> getQuotesDelegate = null)
+        /// <param name="getQuoteFunction">Function to get a single quote for a symbol.</param>
+        public TradierSymbolMapper(Func<string, TradierQuote> getQuoteFunction)
         {
-            _getQuotesDelegate = getQuotesDelegate;
+            _getQuoteFunction = getQuoteFunction ?? throw new ArgumentNullException(nameof(getQuoteFunction));
         }
 
         /// <summary>
@@ -176,34 +179,14 @@ namespace QuantConnect.Brokerages.Tradier
                 return cached;
             }
 
-            // If no delegate provided, return the option ticker as fallback
-            if (_getQuotesDelegate == null)
+            var quote = _getQuoteFunction(brokerageSymbol);
+            if (string.IsNullOrEmpty(quote?.Options_UnderlyingAsset))
             {
-                Log.Trace($"{nameof(TradierSymbolMapper)}.{nameof(GetUnderlyingBrokerageSymbol)}: No quotes delegate provided, using option ticker as underlying: {optionTicker}");
-                _leanUnderlyingSymbol.TryAdd(optionTicker, optionTicker);
-                return optionTicker;
+                throw new InvalidOperationException($"{nameof(TradierSymbolMapper)}.{nameof(GetUnderlyingBrokerageSymbol)}: No underlying asset found for option '{brokerageSymbol}'");
             }
-
-            try
-            {
-                var quotes = _getQuotesDelegate(new List<string> { brokerageSymbol });
-                var underlying = quotes?.FirstOrDefault()?.Options_UnderlyingAsset;
-                
-                if (string.IsNullOrEmpty(underlying))
-                {
-                    Log.Trace($"{nameof(TradierSymbolMapper)}.{nameof(GetUnderlyingBrokerageSymbol)}: No underlying asset found for expired or invalid option '{brokerageSymbol}', using option ticker: {optionTicker}");
-                    underlying = optionTicker;
-                }
-                
-                _leanUnderlyingSymbol.TryAdd(optionTicker, underlying);
-                return underlying;
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, $"{nameof(TradierSymbolMapper)}.{nameof(GetUnderlyingBrokerageSymbol)}: Error getting quotes for '{brokerageSymbol}', using option ticker as fallback: {optionTicker}");
-                _leanUnderlyingSymbol.TryAdd(optionTicker, optionTicker);
-                return optionTicker;
-            }
+            
+            _leanUnderlyingSymbol.TryAdd(optionTicker, quote.Options_UnderlyingAsset);
+            return quote.Options_UnderlyingAsset;
         }
         /// <summary>
         /// Normalizes a brokerage-formatted equity/index ticker to Lean format by replacing slashes ('/') with periods ('.').

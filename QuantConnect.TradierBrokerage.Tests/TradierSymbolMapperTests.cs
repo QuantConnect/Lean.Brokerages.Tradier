@@ -34,7 +34,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                     new TestCaseData(Symbols.SPX, "SPX"),
                     new TestCaseData(Symbol.Create("VIX", SecurityType.Index, Market.USA), "VIX"),
                     
-                    // Equity options - answering reviewer's question about option test cases
+                    // Equity options
                     new TestCaseData(Symbol.CreateOption("QQQ", Market.USA, SecurityType.Option.DefaultOptionStyle(), OptionRight.Put, 350m, new DateTime(2025, 7, 25)), "QQQ250725P00350000"),
                     new TestCaseData(Symbol.CreateOption("SPY", Market.USA, SecurityType.Option.DefaultOptionStyle(), OptionRight.Call, 410m, new DateTime(2021, 3, 19)), "SPY210319C00410000"),
                     new TestCaseData(Symbol.CreateOption("AAPL", Market.USA, SecurityType.Option.DefaultOptionStyle(), OptionRight.Call, 150m, new DateTime(2025, 1, 17)), "AAPL250117C00150000"),
@@ -54,7 +54,11 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         [OneTimeSetUp]
         public void Setup()
         {
-            _symbolMapper = new TradierSymbolMapper(null);
+            // Mock quote function for testing - returns a quote with AAPL as underlying asset
+            _symbolMapper = new TradierSymbolMapper(symbol => new TradierQuote 
+            { 
+                Options_UnderlyingAsset = "AAPL" 
+            });
         }
 
         [Test, TestCaseSource(nameof(TestParameters))]
