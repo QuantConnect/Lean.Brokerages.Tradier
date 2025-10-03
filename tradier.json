@@ -15,5 +15,6 @@
 	"order-types": ["Market", "Limit", "Stop Market",  "Stop Limit" ],
 	"assets": ["Equity", "Equity Options"], 
 	"brokerage-url": "https://tradier.com/individuals/pricing",
+	"landing-page-url": "/brokerages/tradier",
   	"documentation": "/docs/v2/cloud-platform/live-trading/brokerages/tradier"
 }
