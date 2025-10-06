@@ -54,12 +54,20 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         [OneTimeSetUp]
         public void Setup()
         {
-            // Mock quote function for testing - returns a quote with AAPL as underlying asset
-            _symbolMapper = new TradierSymbolMapper(symbol => new TradierQuote 
-            { 
-                Options_UnderlyingAsset = "AAPL" 
-            });
+            _symbolMapper = new TradierSymbolMapper(GetMockUnderlyingAsset);
         }
+
+        private string GetMockUnderlyingAsset(string brokerageSymbol) => brokerageSymbol switch
+        {
+            "BRKB250912C00455000" => "BRK/B",
+            "SPX250117C04500000" => "SPX", 
+            "SPXW250117C04500000" => "SPXW",
+            "VIX250117C00025000" => "VIX",
+            "QQQ250725P00350000" => "QQQ",
+            "SPY210319C00410000" => "SPY",
+            "AAPL250117C00150000" => "AAPL",
+            _ => "AAPL" // Default for other test cases
+        };
 
         [Test, TestCaseSource(nameof(TestParameters))]
         public void ReturnsCorrectLeanSymbol(Symbol expectedLeanSymbol, string brokerSymbol)

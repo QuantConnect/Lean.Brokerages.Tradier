@@ -239,7 +239,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             // Get quote for the underlying symbol
             var underlyingSymbol = symbol.Underlying ?? symbol;
             // Convert dot tickers to brokerage format (slashes) when sending raw strings
-            var mapper = new TradierSymbolMapper();
+            var mapper = new TradierSymbolMapper(brokerageSymbol => brokerageSymbol);
             var underlyingTickerForBrokerage = mapper.GetBrokerageSymbol(underlyingSymbol);
             var quote = _brokerage.GetQuotes(new() { underlyingTickerForBrokerage })?.FirstOrDefault()?.Last ?? 0;
             if (quote == 0)

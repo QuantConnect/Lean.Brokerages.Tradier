@@ -512,14 +512,15 @@ namespace QuantConnect.Brokerages.Tradier
         }
 
         /// <summary>
-        /// Gets a single quote for the specified symbol.
+        /// Gets the underlying asset for the specified brokerage option symbol.
         /// </summary>
-        /// <param name="symbol">The symbol to get a quote for</param>
-        /// <returns>The quote for the symbol, or null if not found</returns>
-        public TradierQuote GetQuote(string symbol)
+        /// <param name="brokerageSymbol">The brokerage option symbol</param>
+        /// <returns>The underlying asset symbol, or null if not found</returns>
+        private string GetUnderlyingAssetByBrokerageSymbol(string brokerageSymbol)
         {
-            var quotes = GetQuotes(new List<string> { symbol });
-            return quotes?.FirstOrDefault();
+            var quotes = GetQuotes(new List<string> { brokerageSymbol });
+            var quote = quotes?.FirstOrDefault();
+            return quote?.Options_UnderlyingAsset;
         }
 
         /// <summary>
@@ -1829,8 +1830,8 @@ Interval	Data Available (Open)	Data Available (All)
             };
             ValidateSubscription();
             
-            // Initialize the symbol mapper with the GetQuote function
-            _symbolMapper = new TradierSymbolMapper(GetQuote);
+            // Initialize the symbol mapper with the GetUnderlyingAssetByBrokerageSymbol function
+            _symbolMapper = new TradierSymbolMapper(GetUnderlyingAssetByBrokerageSymbol);
 
             _subscribeThead = new Thread(() =>
             {

@@ -29,9 +29,9 @@ namespace QuantConnect.Brokerages.Tradier
     public class TradierSymbolMapper : ISymbolMapper
     {
         /// <summary>
-        /// Function to retrieve a single quote for a given symbol from the brokerage API.
+        /// Function to retrieve the underlying asset for a given brokerage option symbol.
         /// </summary>
-        private readonly Func<string, TradierQuote> _getQuoteFunction;
+        private readonly Func<string, string> _getUnderlyingAssetFunction;
 
         public static readonly FrozenSet<SecurityType> SupportedOptionTypes =
         [
@@ -52,10 +52,10 @@ namespace QuantConnect.Brokerages.Tradier
         /// <summary>
         /// Initializes a new instance of the TradierSymbolMapper class.
         /// </summary>
-        /// <param name="getQuoteFunction">Function to get a single quote for a symbol.</param>
-        public TradierSymbolMapper(Func<string, TradierQuote> getQuoteFunction)
+        /// <param name="getUnderlyingAssetFunction">Function to get underlying asset for a brokerage symbol.</param>
+        public TradierSymbolMapper(Func<string, string> getUnderlyingAssetFunction)
         {
-            _getQuoteFunction = getQuoteFunction ?? throw new ArgumentNullException(nameof(getQuoteFunction));
+            _getUnderlyingAssetFunction = getUnderlyingAssetFunction;
         }
 
         /// <summary>
@@ -179,14 +179,9 @@ namespace QuantConnect.Brokerages.Tradier
                 return cached;
             }
 
-            var quote = _getQuoteFunction(brokerageSymbol);
-            if (string.IsNullOrEmpty(quote?.Options_UnderlyingAsset))
-            {
-                throw new InvalidOperationException($"{nameof(TradierSymbolMapper)}.{nameof(GetUnderlyingBrokerageSymbol)}: No underlying asset found for option '{brokerageSymbol}'");
-            }
-            
-            _leanUnderlyingSymbol.TryAdd(optionTicker, quote.Options_UnderlyingAsset);
-            return quote.Options_UnderlyingAsset;
+            var underlyingAsset = _getUnderlyingAssetFunction(brokerageSymbol);
+            _leanUnderlyingSymbol.TryAdd(optionTicker, underlyingAsset);
+            return underlyingAsset;
         }
         /// <summary>
         /// Normalizes a brokerage-formatted equity/index ticker to Lean format by replacing slashes ('/') with periods ('.').
