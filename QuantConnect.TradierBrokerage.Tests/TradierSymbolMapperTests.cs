@@ -66,7 +66,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             "QQQ250725P00350000" => "QQQ",
             "SPY210319C00410000" => "SPY",
             "AAPL250117C00150000" => "AAPL",
-            _ => "AAPL" // Default for other test cases
+            _ => throw new NotImplementedException($"{nameof(TradierSymbolMapperTests)}.{nameof(GetMockUnderlyingAsset)}: Add mapping for test brokerage symbol '{brokerageSymbol}'")
         };
 
         [Test, TestCaseSource(nameof(TestParameters))]
