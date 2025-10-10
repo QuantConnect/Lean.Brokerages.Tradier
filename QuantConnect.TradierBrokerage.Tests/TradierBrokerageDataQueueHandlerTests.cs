@@ -13,70 +13,142 @@
  * limitations under the License.
 */
 
+using System;
+using System.Linq;
 using NUnit.Framework;
 using System.Threading;
 using QuantConnect.Data;
 using QuantConnect.Logging;
 using QuantConnect.Data.Market;
+using System.Collections.Generic;
+using System.Collections.Concurrent;
 using QuantConnect.Brokerages.Tradier;
-using System;
+using QuantConnect.Lean.Engine.DataFeeds.Enumerators;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
     [TestFixture]
     public partial class TradierBrokerageTests : BrokerageTests
     {
-        private static TestCaseData[] TestParameters
+        private static IEnumerable<TestCaseData> TestParameters
         {
             get
             {
-                return new[]
-                {
-                    // valid parameters, for example
-                    new TestCaseData(Symbols.AAPL, Resolution.Tick, false),
-                };
+                // valid parameters, for example
+                yield return new TestCaseData(Symbols.AAPL, Resolution.Tick, false);
+                yield return new TestCaseData(Symbols.SPX, Resolution.Tick, false);
+
+                // Option: AAPL
+                var aaplOption = Symbol.CreateOption(Symbols.AAPL, Market.USA, Symbols.AAPL.SecurityType.DefaultOptionStyle(), OptionRight.Call, 227.5m, new DateTime(2025, 09, 12));
+                yield return new TestCaseData(aaplOption, Resolution.Tick, false);
+                yield return new TestCaseData(aaplOption, Resolution.Second, false);
+
+                // IndexOption: SPX
+                var spxOption = Symbol.CreateOption(Symbols.SPX, Symbols.SPX.ID.Market, SecurityType.IndexOption.DefaultOptionStyle(), OptionRight.Call, 6550m, new DateTime(2025, 09, 19));
+                yield return new TestCaseData(spxOption, Resolution.Tick, false);
+
+                // IndexOption: SPXW
+                var spxwOption = Symbol.CreateOption(Symbols.SPX, "SPXW", Symbols.SPX.ID.Market, SecurityType.IndexOption.DefaultOptionStyle(), OptionRight.Call, 6580m, new DateTime(2025, 09, 12));
+                yield return new TestCaseData(spxwOption, Resolution.Tick, false);
+                yield return new TestCaseData(spxwOption, Resolution.Second, false);
             }
         }
 
         [Test, TestCaseSource(nameof(TestParameters)), Explicit("Long execution time")]
         public void StreamsData(Symbol symbol, Resolution resolution, bool throwsException)
         {
-            var cancelationToken = new CancellationTokenSource();
+            var obj = new object();
+            var cancelationTokenSource = new CancellationTokenSource();
+            var resetEvent = new AutoResetEvent(false);
 
-            var tradier = (TradierBrokerage)Brokerage;
-            SubscriptionDataConfig[] configs;
+            var brokerage = (TradierBrokerage)Brokerage;
+            var configs = new List<SubscriptionDataConfig>();
             if (resolution == Resolution.Tick)
             {
                 var tradeConfig = new SubscriptionDataConfig(GetSubscriptionDataConfig<Tick>(symbol, resolution), tickType: TickType.Trade);
                 var quoteConfig = new SubscriptionDataConfig(GetSubscriptionDataConfig<Tick>(symbol, resolution), tickType: TickType.Quote);
-                configs = new[] { tradeConfig, quoteConfig };
+                configs.AddRange(tradeConfig, quoteConfig);
             }
             else
             {
-                configs = new[] { GetSubscriptionDataConfig<QuoteBar>(symbol, resolution),
-                    GetSubscriptionDataConfig<TradeBar>(symbol, resolution) };
+                configs.Add(GetSubscriptionDataConfig<QuoteBar>(symbol, resolution));
+                configs.Add(GetSubscriptionDataConfig<TradeBar>(symbol, resolution));
             }
+
+            var incomingSymbolDataByTickType = new ConcurrentDictionary<(Symbol, TickType), List<BaseData>>();
+
+            Action<BaseData> callback = (dataPoint) =>
+            {
+                if (dataPoint == null)
+                {
+                    return;
+                }
+
+                switch (dataPoint)
+                {
+                    case Tick tick:
+                        AddOrUpdateDataPoint(incomingSymbolDataByTickType, tick.Symbol, tick.TickType, tick);
+                        break;
+                    case TradeBar tradeBar:
+                        AddOrUpdateDataPoint(incomingSymbolDataByTickType, tradeBar.Symbol, TickType.Trade, tradeBar);
+                        break;
+                    case QuoteBar quoteBar:
+                        AddOrUpdateDataPoint(incomingSymbolDataByTickType, quoteBar.Symbol, TickType.Quote, quoteBar);
+                        break;
+                }
+
+                lock (obj)
+                {
+                    if (incomingSymbolDataByTickType.Count == configs.Count && incomingSymbolDataByTickType.Any(d => d.Value.Count > 2))
+                    {
+                        resetEvent.Set();
+                    }
+                }
+            };
 
             foreach (var config in configs)
             {
-                ProcessFeed(tradier.Subscribe(config, (s, e) => { }),
-                    cancelationToken,
-                    (baseData) => {
-                        if (baseData != null) { Log.Trace($"{baseData}"); }
-                    });
+                ProcessFeed(brokerage.Subscribe(config, (s, e) =>
+                {
+                    var dataPoint = ((NewDataAvailableEventArgs)e).DataPoint;
+                    Log.Trace($"{dataPoint}. Time span: {dataPoint.Time} - {dataPoint.EndTime}");
+                }),
+                cancelationTokenSource,
+                callback: callback);
             }
 
-            // long runtime so we assert the session refresh and data stream is not interrupted
-            Thread.Sleep(1000 * 15 * 60);
+            resetEvent.WaitOne(TimeSpan.FromMinutes(2), cancelationTokenSource.Token);
 
             foreach (var config in configs)
             {
-                tradier.Unsubscribe(config);
+                brokerage.Unsubscribe(config);
             }
 
-            Thread.Sleep(1000);
+            resetEvent.WaitOne(TimeSpan.FromSeconds(5), cancelationTokenSource.Token);
 
-            cancelationToken.Cancel();
+            var symbolVolatilities = incomingSymbolDataByTickType.Where(kv => kv.Value.Count > 0).ToList();
+
+            Assert.IsNotEmpty(symbolVolatilities);
+            Assert.That(symbolVolatilities.Count, Is.GreaterThan(1));
+
+            cancelationTokenSource.Cancel();
+        }
+
+        private void AddOrUpdateDataPoint(
+            ConcurrentDictionary<(Symbol, TickType), List<BaseData>> dictionary,
+            Symbol symbol,
+            TickType tickType,
+            BaseData dataPoint)
+        {
+            dictionary.AddOrUpdate(
+                (symbol, tickType),
+                [dataPoint], // Add scenario: create a new list with the dataPoint
+                (key, existingList) =>
+                {
+                    existingList.Add(dataPoint); // Add dataPoint to the existing list
+                    return existingList; // Return the updated list
+                }
+            );
         }
     }
 }

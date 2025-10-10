@@ -194,7 +194,7 @@ namespace QuantConnect.Brokerages.Tradier
 
         ///Option Underlying Asset
         [JsonProperty(PropertyName = "underlying")]
-        private string Options_UnderlyingAsset = "";
+        public string Options_UnderlyingAsset = "";
 
         ///Option Strike Price
         [JsonProperty(PropertyName = "strike")]
@@ -482,5 +482,26 @@ namespace QuantConnect.Brokerages.Tradier
 
             return Time.UnixMillisecondTimeStampToDateTime(unix);
         }
+    }
+
+    /// <summary>
+    /// Container for options lookup response
+    /// </summary>
+    public class TradierOptionsLookupContainer
+    {
+        [JsonProperty(PropertyName = "symbols")]
+        public List<TradierOptionsLookupResult> Symbols;
+    }
+
+    /// <summary>
+    /// Options lookup result containing root symbol and options
+    /// </summary>
+    public class TradierOptionsLookupResult
+    {
+        [JsonProperty(PropertyName = "rootSymbol")]
+        public string RootSymbol;
+
+        [JsonProperty(PropertyName = "options")]
+        public List<string> Options;
     }
 }

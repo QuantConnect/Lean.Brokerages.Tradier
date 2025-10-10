@@ -22,32 +22,63 @@ namespace QuantConnect.Tests.Brokerages.Tradier
     [TestFixture]
     public class TradierSymbolMapperTests
     {
-        [Test]
-        public void ReturnsCorrectLeanSymbol()
+        private TradierSymbolMapper _symbolMapper;
+        private static TestCaseData[] TestParameters
         {
-            var mapper = new TradierSymbolMapper();
-
-            var leanSymbol = mapper.GetLeanSymbol("AAPL");
-            var expected = Symbols.AAPL;
-            Assert.AreEqual(expected, leanSymbol);
-
-            leanSymbol = mapper.GetLeanSymbol("SPY210319C00410000");
-            expected = Symbol.CreateOption("SPY", Market.USA, OptionStyle.American, OptionRight.Call, 410m, new DateTime(2021, 3, 19));
-            Assert.AreEqual(expected, leanSymbol);
+            get
+            {
+                return new[]
+                {
+                    // Basic equity and index symbols
+                    new TestCaseData(Symbols.AAPL, "AAPL"),
+                    new TestCaseData(Symbols.SPX, "SPX"),
+                    new TestCaseData(Symbol.Create("VIX", SecurityType.Index, Market.USA), "VIX"),
+                    
+                    // Equity options
+                    new TestCaseData(Symbol.CreateOption("QQQ", Market.USA, SecurityType.Option.DefaultOptionStyle(), OptionRight.Put, 350m, new DateTime(2025, 7, 25)), "QQQ250725P00350000"),
+                    new TestCaseData(Symbol.CreateOption("SPY", Market.USA, SecurityType.Option.DefaultOptionStyle(), OptionRight.Call, 410m, new DateTime(2021, 3, 19)), "SPY210319C00410000"),
+                    new TestCaseData(Symbol.CreateOption("AAPL", Market.USA, SecurityType.Option.DefaultOptionStyle(), OptionRight.Call, 150m, new DateTime(2025, 1, 17)), "AAPL250117C00150000"),
+                    
+                    // Index options - including SPX and SPXW weeklies
+                    new TestCaseData(Symbol.CreateOption(Symbols.SPX, "SPX", Market.USA, SecurityType.IndexOption.DefaultOptionStyle(), OptionRight.Call, 5900m, new DateTime(2025, 7, 25)), "SPX250725C05900000"),
+                    new TestCaseData(Symbol.CreateOption(Symbols.SPX, "SPXW", Market.USA, SecurityType.IndexOption.DefaultOptionStyle(), OptionRight.Call, 5900m, new DateTime(2025, 7, 25)), "SPXW250725C05900000"),
+                    new TestCaseData(Symbol.CreateOption(Symbol.Create("VIX", SecurityType.Index, Market.USA), "VIX", Market.USA, SecurityType.IndexOption.DefaultOptionStyle(), OptionRight.Put, 25m, new DateTime(2025, 8, 20)), "VIX250820P00025000"),
+                    
+                    // Dot ticker symbols and their options
+                    new TestCaseData(Symbol.Create("BRK.B", SecurityType.Equity, Market.USA), "BRK/B"),
+                    new TestCaseData(Symbol.CreateOption(Symbol.Create("BRK.B", SecurityType.Equity, Market.USA), Market.USA, SecurityType.Option.DefaultOptionStyle(), OptionRight.Call, 455.0m , new DateTime(2025, 9, 12)), "BRKB250912C00455000"),                
+                };
+            }
         }
 
-        [Test]
-        public void ReturnsCorrectBrokerageSymbol()
+        [OneTimeSetUp]
+        public void Setup()
         {
-            var mapper = new TradierSymbolMapper();
+            _symbolMapper = new TradierSymbolMapper(GetMockUnderlyingAsset);
+        }
 
-            var equitySymbol = Symbols.AAPL;
-            var brokerageSymbol = mapper.GetBrokerageSymbol(equitySymbol);
-            Assert.AreEqual("AAPL", brokerageSymbol);
+        private string GetMockUnderlyingAsset(string brokerageSymbol) => brokerageSymbol switch
+        {
+            "BRKB250912C00455000" => "BRK/B",
+            "SPX250117C04500000" => "SPX", 
+            "SPXW250117C04500000" => "SPXW",
+            "VIX250117C00025000" => "VIX",
+            "QQQ250725P00350000" => "QQQ",
+            "SPY210319C00410000" => "SPY",
+            "AAPL250117C00150000" => "AAPL",
+            _ => throw new NotImplementedException($"{nameof(TradierSymbolMapperTests)}.{nameof(GetMockUnderlyingAsset)}: Add mapping for test brokerage symbol '{brokerageSymbol}'")
+        };
 
-            var optionSymbol = Symbol.CreateOption("SPY", Market.USA, OptionStyle.American, OptionRight.Call, 410m, new DateTime(2021, 3, 19));
-            brokerageSymbol = mapper.GetBrokerageSymbol(optionSymbol);
-            Assert.AreEqual("SPY210319C00410000", brokerageSymbol);
+        [Test, TestCaseSource(nameof(TestParameters))]
+        public void ReturnsCorrectLeanSymbol(Symbol expectedLeanSymbol, string brokerSymbol)
+        {
+            Assert.AreEqual(expectedLeanSymbol, _symbolMapper.GetLeanSymbol(brokerSymbol));
+        }
+
+        [Test, TestCaseSource(nameof(TestParameters))]
+        public void ReturnsCorrectBrokerageSymbol(Symbol leanSymbol, string expectedBrokerSymbol)
+        {
+            Assert.AreEqual(expectedBrokerSymbol, _symbolMapper.GetBrokerageSymbol(leanSymbol));
         }
     }
 }

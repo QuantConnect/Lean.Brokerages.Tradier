@@ -36,19 +36,42 @@ namespace QuantConnect.Brokerages.Tradier
         /// <returns>Enumerable of Symbols, that are associated with the provided Symbol</returns>
         public IEnumerable<Symbol> LookupSymbols(Symbol symbol, bool includeExpired, string securityCurrency = null)
         {
-            if (symbol.SecurityType != SecurityType.Option)
-            {
-                return Enumerable.Empty<Symbol>();
-            }
+            //Removed Conditional check for supported asset types, because we can pass the 
 
-            var lookupName = symbol.Underlying.Value;
+            var lookupName = symbol.Underlying?.Value ?? symbol.Value;
+            var underlyingSecurityType = symbol.Underlying?.SecurityType ?? symbol.SecurityType;
 
             Log.Trace($"TradierBrokerage.LookupSymbols(): Requesting symbol list for {lookupName} ...");
 
             var symbols = new List<Symbol>();
-
             var today = DateTime.UtcNow.ConvertFromUtc(TimeZones.NewYork).Date;
-            symbols.AddRange(_algorithm.OptionChainProvider.GetOptionContractList(symbol.Underlying, today));
+            
+            // Convert Lean symbol to brokerage format for API call (e.g., BRK.B -> BRK/B)
+            // For canonical option symbols, we need to use the underlying symbol's security type
+            var brokerageLookupName = _symbolMapper.GetBrokerageSymbol(Symbol.Create(lookupName, (SecurityType)underlyingSecurityType, symbol.ID.Market));
+            
+            // Use Tradier's options lookup API endpoint to get options symbols
+            var optionsLookupResult = GetOptionsLookup(brokerageLookupName);
+            
+            // Convert Tradier options symbols to Lean symbols
+            if (optionsLookupResult?.Options != null)
+            {
+                foreach (var optionSymbol in optionsLookupResult.Options)
+                {
+                    try
+                    {
+                        var leanSymbol = _symbolMapper.GetLeanSymbol(optionSymbol);
+                        if (leanSymbol != null)
+                        {
+                            symbols.Add(leanSymbol);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Trace($"TradierBrokerage.LookupSymbols(): Failed to convert symbol {optionSymbol}: {ex.Message}");
+                    }
+                }
+            }
 
             // Try to remove options contracts that have expired
             if (!includeExpired)

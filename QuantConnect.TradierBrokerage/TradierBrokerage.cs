@@ -74,7 +74,7 @@ namespace QuantConnect.Brokerages.Tradier
             new EquityExchange(MarketHoursDatabase.FromDataFolder().GetExchangeHours(Market.USA, null, SecurityType.Equity));
 
         private readonly SymbolPropertiesDatabase _symbolPropertiesDatabase = SymbolPropertiesDatabase.FromDataFolder();
-        private readonly TradierSymbolMapper _symbolMapper = new TradierSymbolMapper();
+        private TradierSymbolMapper _symbolMapper;
 
         private string _previousResponseRaw = "";
         private readonly object _lockAccessCredentials = new object();
@@ -512,6 +512,18 @@ namespace QuantConnect.Brokerages.Tradier
         }
 
         /// <summary>
+        /// Gets the underlying asset for the specified brokerage option symbol.
+        /// </summary>
+        /// <param name="brokerageSymbol">The brokerage option symbol</param>
+        /// <returns>The underlying asset symbol, or null if not found</returns>
+        private string GetUnderlyingAssetByBrokerageSymbol(string brokerageSymbol)
+        {
+            var quotes = GetQuotes(new List<string> { brokerageSymbol });
+            var quote = quotes?.FirstOrDefault();
+            return quote?.Options_UnderlyingAsset;
+        }
+
+        /// <summary>
         /// Get the historical bars for this period
         /// </summary>
         private IEnumerable<TradierTimeSeries> GetTimeSeries(HistoryRequest historyRequest, DateTime start, DateTime end, TradierTimeSeriesIntervals interval)
@@ -662,6 +674,19 @@ Interval	Data Available (Open)	Data Available (All)
         }
 
         /// <summary>
+        /// Get all options symbols for the given underlying.
+        /// </summary>
+        /// <param name="underlying">Underlying symbol of the chain</param>
+        /// <returns>Options lookup results</returns>
+        private TradierOptionsLookupResult GetOptionsLookup(string underlying)
+        {
+            var request = new RestRequest("markets/options/lookup", Method.GET);
+            request.AddParameter("underlying", underlying, ParameterType.QueryString);
+            var optionsContainer = Execute<List<TradierOptionsLookupResult>>(request, TradierApiRequestType.Data, "symbols");
+            return optionsContainer != null ? optionsContainer.FirstOrDefault() : new TradierOptionsLookupResult();
+        }
+
+        /// <summary>
         /// Convert the C# Enums back to the Tradier API Equivalent:
         /// </summary>
         private string GetEnumDescription(Enum value)
@@ -767,7 +792,7 @@ Interval	Data Available (Open)	Data Available (All)
             if (balanceDetails == null)
             {
                 return new List<CashAmount>();
-            };
+            }
 
             return new List<CashAmount>
             {
@@ -1586,7 +1611,7 @@ Interval	Data Available (Open)	Data Available (All)
             var symbol = _symbolMapper.GetLeanSymbol(position.Symbol);
 
             var averagePrice = position.CostBasis / position.Quantity;
-            if (symbol.SecurityType == SecurityType.Option)
+            if (TradierSymbolMapper.SupportedOptionTypes.Contains(symbol.SecurityType))
             {
                 var multiplier = _symbolPropertiesDatabase.GetSymbolProperties(
                         symbol.ID.Market,
@@ -1621,16 +1646,16 @@ Interval	Data Available (Open)	Data Available (All)
             return position switch
             {
                 // Increasing existing long position or opening new long position from zero
-                OrderPosition.BuyToOpen => securityType == SecurityType.Option ? TradierOrderDirection.BuyToOpen : TradierOrderDirection.Buy,
+                OrderPosition.BuyToOpen => TradierSymbolMapper.SupportedOptionTypes.Contains(securityType) ? TradierOrderDirection.BuyToOpen : TradierOrderDirection.Buy,
 
                 // Decreasing existing short position or opening new short position from zero
-                OrderPosition.SellToOpen => securityType == SecurityType.Option ? TradierOrderDirection.SellToOpen : TradierOrderDirection.SellShort,
+                OrderPosition.SellToOpen => TradierSymbolMapper.SupportedOptionTypes.Contains(securityType) ? TradierOrderDirection.SellToOpen : TradierOrderDirection.SellShort,
 
                 // Buying from an existing short position (reducing, closing or flipping)
-                OrderPosition.BuyToClose => securityType == SecurityType.Option ? TradierOrderDirection.BuyToClose : TradierOrderDirection.BuyToCover,
+                OrderPosition.BuyToClose => TradierSymbolMapper.SupportedOptionTypes.Contains(securityType) ? TradierOrderDirection.BuyToClose : TradierOrderDirection.BuyToCover,
 
                 // Selling from an existing long position (reducing, closing or flipping)
-                OrderPosition.SellToClose => securityType == SecurityType.Option ? TradierOrderDirection.SellToClose : TradierOrderDirection.Sell,
+                OrderPosition.SellToClose => TradierSymbolMapper.SupportedOptionTypes.Contains(securityType) ? TradierOrderDirection.SellToClose : TradierOrderDirection.Sell,
 
                 // This should never happen
                 _ => TradierOrderDirection.None
@@ -1706,6 +1731,7 @@ Interval	Data Available (Open)	Data Available (All)
                     return TradierOrderClass.Equity;
 
                 case SecurityType.Option:
+                case SecurityType.IndexOption:
                     return TradierOrderClass.Option;
 
                 default:
@@ -1803,6 +1829,9 @@ Interval	Data Available (Open)	Data Available (All)
                 }
             };
             ValidateSubscription();
+            
+            // Initialize the symbol mapper with the GetUnderlyingAssetByBrokerageSymbol function
+            _symbolMapper = new TradierSymbolMapper(GetUnderlyingAssetByBrokerageSymbol);
 
             _subscribeThead = new Thread(() =>
             {
@@ -1842,7 +1871,8 @@ Interval	Data Available (Open)	Data Available (All)
                         Log.Error(ex);
                     }
                 }
-            }){ IsBackground = true};
+            })
+            { IsBackground = true };
             _subscribeThead.Start();
         }
 
@@ -1911,7 +1941,7 @@ Interval	Data Available (Open)	Data Available (All)
                 QCOrder = order;
                 Classification = classification;
 
-                if (order.SecurityType == SecurityType.Option)
+                if (TradierSymbolMapper.SupportedOptionTypes.Contains(order.SecurityType))
                 {
                     OptionSymbol = symbolMapper.GetBrokerageSymbol(order.Symbol);
                     Symbol = order.Symbol.Underlying.Value;
@@ -2089,7 +2119,7 @@ Interval	Data Available (Open)	Data Available (All)
         public static TimeSpan GetSubscriptionRefreshTimeout(DateTime utcTime)
         {
             var nyTime = utcTime.ConvertFromUtc(TimeZones.NewYork);
-            if(nyTime.TimeOfDay < TimeSpan.FromHours(4))
+            if (nyTime.TimeOfDay < TimeSpan.FromHours(4))
             {
                 return TimeSpan.FromHours(4) - nyTime.TimeOfDay;
             }

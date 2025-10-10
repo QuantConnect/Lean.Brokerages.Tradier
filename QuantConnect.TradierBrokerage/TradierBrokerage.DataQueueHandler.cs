@@ -39,7 +39,7 @@ namespace QuantConnect.Brokerages.Tradier
 
         private const string WebSocketUrl = "wss://ws.tradier.com/v1/markets/events";
 
-        private object _streamSessionLock = new ();
+        private object _streamSessionLock = new();
         private TradierStreamSession _streamSession;
 
         private readonly ConcurrentDictionary<string, Symbol> _subscribedTickers = new ConcurrentDictionary<string, Symbol>();
@@ -103,7 +103,7 @@ namespace QuantConnect.Brokerages.Tradier
 
         private bool CanSubscribe(Symbol symbol)
         {
-            return (symbol.ID.SecurityType == SecurityType.Equity || symbol.ID.SecurityType == SecurityType.Option)
+            return TradierSymbolMapper.SupportedSecurityTypes.Contains(symbol.ID.SecurityType)
                 && !symbol.Value.Contains("-UNIVERSE-")
                 // continuous futures and canonical symbols not supported
                 && !symbol.IsCanonical();
@@ -173,7 +173,7 @@ namespace QuantConnect.Brokerages.Tradier
         private void SendSubscribeMessage()
         {
             var tickers = _subscribedTickers.Keys.ToList();
-            if(tickers.Count == 0)
+            if (tickers.Count == 0)
             {
                 // Tradier expects at least one symbol
                 tickers = new List<string> { "$empty$" };
@@ -235,7 +235,10 @@ namespace QuantConnect.Brokerages.Tradier
             if (tsd.Type == "trade")
             {
                 // Occasionally Tradier sends trades with 0 volume?
-                if (tsd.TradeSize == 0 || !tsd.TradePrice.HasValue) return null;
+                if ((tsd.TradeSize == 0 && symbol.SecurityType != SecurityType.Index) || !tsd.TradePrice.HasValue)
+                {
+                    return null;
+                }
             }
 
             // Tradier trades are US NY time only. Convert local server time to NY Time:
