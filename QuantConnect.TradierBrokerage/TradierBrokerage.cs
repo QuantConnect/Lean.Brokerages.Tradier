@@ -119,6 +119,11 @@ namespace QuantConnect.Brokerages.Tradier
         public override string AccountBaseCurrency => Currencies.USD;
 
         /// <summary>
+        /// Enables or disables concurrent processing of messages to and from the brokerage.
+        /// </summary>
+        public override bool ConcurrencyEnabled => true;
+
+        /// <summary>
         /// Create a new Tradier Object:
         /// </summary>
         public TradierBrokerage() : base("Tradier Brokerage")
