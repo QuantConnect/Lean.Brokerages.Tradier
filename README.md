@@ -21,15 +21,15 @@ This repository hosts the Tradier Brokerage Plugin Integration with the QuantCon
 </picture>
 <p>
 
-Tradier was founded by Dan Raju, Peter Laptewicz, Jason Barry, Jeyashree Chidambaram, and Steve Agalloco in 2012 with the goal to "deliver a choice of low-cost, high-value brokerage services to traders". Tradier provides access to trading Equities and Options for clients in over 250 countries and territories with [no minimum deposit for cash accounts](https://brokerage.tradier.com/support). Tradier also delivers custody, clearing, execution, and billing on behalf of registered advisors.
+Tradier was founded by Dan Raju, Peter Laptewicz, Jason Barry, Jeyashree Chidambaram, and Steve Agalloco in 2012 with the goal to "deliver a choice of low-cost, high-value brokerage services to traders". Tradier provides access to trading Equities and Options for clients in over 250 countries and territories with [no minimum deposit for cash accounts](https://brokerage.tradier.com/contact). Tradier also delivers custody, clearing, execution, and billing on behalf of registered advisors.
 
-For more information about the Tradier brokerage, see  the [QuantConnect-Tradier Integration Page](https://www.quantconnect.com/docs/v2/our-platform/live-trading/brokerages/tradier). 
+For more information about the Tradier brokerage, see  the [QuantConnect-Tradier Integration Page](https://www.quantconnect.com/docs/v2/cloud-platform/live-trading/brokerages/tradier). 
 
 ## Using the Brokerage Plugin
   
 ### Deploying Tradier with VSCode User Interace
 
-  You can deploy using a visual interface in the QuantConnect cloud. For instructions, see the [QuantConnect-Tradier Integration Page](https://www.quantconnect.com/docs/v2/our-platform/live-trading/brokerages/tradier). 
+  You can deploy using a visual interface in the QuantConnect cloud. For instructions, see the [QuantConnect-Tradier Integration Page](https://www.quantconnect.com/docs/v2/cloud-platform/live-trading/brokerages/tradier). 
 
 ![deploy-tradier](https://user-images.githubusercontent.com/38889814/188247546-9aac048c-f271-403e-903e-0f9bbfe95b0c.gif)
 
@@ -39,7 +39,7 @@ For more information about the Tradier brokerage, see  the [QuantConnect-Tradier
 
 Follow these steps to start local live trading with the Tradier brokerage:
 
-1.  Open a terminal in your [CLI root directory](https://www.quantconnect.com/docs/v2/lean-cli/initialization/directory-structure#02-lean-init).
+1.  Open a terminal in your [organization workspace](https://www.quantconnect.com/docs/v2/lean-cli/initialization/organization-workspaces).
 2.  Run `lean live "<projectName>"` to start a live deployment wizard for the project in `./<projectName>` and then enter the brokerage number.
 
 	```
@@ -103,8 +103,8 @@ Follow these steps to start local live trading with the Tradier brokerage:
     To enter multiple options, separate them with comma.:
     ```
 
-    If you select IQFeed, see [IQFeed](https://www.quantconnect.com/docs/v2/lean-cli/live-trading/other-data-feeds/iqfeed) for set up instructions.  
-    If you select Polygon Data Feed, see [Polygon](https://www.quantconnect.com/docs/v2/lean-cli/live-trading/other-data-feeds/polygon) for set up instructions.
+    If you select IQFeed, see [IQFeed](https://www.quantconnect.com/docs/v2/lean-cli/live-trading/data-providers/iqfeed) for set up instructions.  
+    If you select Polygon Data Feed, see [Polygon](https://www.quantconnect.com/docs/v2/lean-cli/live-trading/data-providers/polygon) for set up instructions.
 
 6.  View the result in the `<projectName>/live/<timestamp>` directory. Results are stored in real-time in JSON format. You can save results to a different directory by providing the `--output <path>` option in step 2.
 
@@ -147,7 +147,7 @@ You can set the Brokerage Model with the following statements
     SetBrokerageModel(BrokerageName.TradierBrokerage, AccountType.Cash);
     SetBrokerageModel(BrokerageName.TradierBrokerage, AccountType.Margin);
 
-[Read Documentation](https://www.quantconnect.com/docs/v2/our-platform/live-trading/brokerages/tradier)
+[Read Documentation](https://www.quantconnect.com/docs/v2/cloud-platform/live-trading/brokerages/tradier)
 
 ### Fees
 
@@ -160,13 +160,13 @@ We model the order fees of Tradier. The following table shows the fees of each a
 
 There is a $9 fee to exercise Option contracts.
 
-To check the latest fees, see the [Pricing](https://brokerage.tradier.com/pricing) page on the Tradier website.
+To check the latest fees, see the [Pricing](https://tradier.com/individuals/pricing) page on the Tradier website.
 
 ### Margin
 
 We model buying power and margin calls to ensure your algorithm stays within the margin requirements.
 
-[Read Documentation](https://www.quantconnect.com/docs/v2/our-platform/live-trading/brokerages/tradier)
+[Read Documentation](https://www.quantconnect.com/docs/v2/cloud-platform/live-trading/brokerages/tradier)
 
 #### Buying Power
 
