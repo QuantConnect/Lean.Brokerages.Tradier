@@ -253,6 +253,15 @@ namespace QuantConnect.Brokerages.Tradier
                 }
                 catch (Exception e)
                 {
+                    // a transiently malformed body (e.g. an HTML maintenance/error page served instead of JSON) can fail
+                    // deserialization; treat it like the other transient failures and retry before raising a fatal error
+                    Log.Error($"{method}(JsonError): Parameters: {string.Join(",", parameters)} Response: {raw.Content} Error: {e.Message}");
+                    if (attempts++ < max)
+                    {
+                        Log.Trace(method + "(JsonError): Attempting again...");
+                        Thread.Sleep(3000);
+                        return Execute<T>(request, type, rootName, attempts, max);
+                    }
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "JsonError", $"Error deserializing message: {raw.Content} Error: {e.Message}"));
                 }
 
