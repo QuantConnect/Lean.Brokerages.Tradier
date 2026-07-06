@@ -13,12 +13,19 @@
  * limitations under the License.
 */
 
+using Moq;
+using Newtonsoft.Json.Linq;
 using NUnit.Framework;
+using QuantConnect.Brokerages;
 using QuantConnect.Brokerages.Tradier;
 using QuantConnect.Interfaces;
 using QuantConnect.Orders;
 using QuantConnect.Util;
+using RestSharp;
 using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Reflection;
 
 namespace QuantConnect.Tests.Brokerages.Tradier
 {
@@ -68,6 +75,101 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         public TradierOrderDirection ConvertsOrderDirection(OrderDirection direction, decimal holdingsQuantity, SecurityType securityType)
         {
             return TestableTradierBrokerage.ConvertDirectionPublic(direction, securityType, holdingsQuantity);
+        }
+
+        // Tradier's API can transiently serve a non-JSON body (e.g. its docs/maintenance HTML page) with a 200 status.
+        // Deserialization then throws; this must be treated as a transient failure and retried, not raised as a fatal
+        // error before the retry runs (see https://github.com/QuantConnect/Lean.Brokerages.Tradier/issues/45).
+        [Test]
+        public void RetriesTransientlyMalformedResponseInsteadOfFailing()
+        {
+            var htmlPage = "<!DOCTYPE html><html lang=\"en\"><head><title>Tradier API</title></head><body></body></html>";
+            var errors = new List<BrokerageMessageEvent>();
+            var restClient = new Mock<IRestClient>();
+            restClient.SetupSequence(x => x.Execute(It.IsAny<IRestRequest>()))
+                .Returns(CreateResponse(htmlPage))
+                .Returns(CreateResponse("{\"ok\":true}"));
+
+            var brokerage = CreateBrokerageWithRestClient(restClient.Object, errors);
+            var result = InvokeExecute<JObject>(brokerage, TradierApiRequestType.Standard, max: 3);
+
+            // the malformed body must not raise a fatal error before the retry, which succeeds and returns the payload
+            Assert.IsEmpty(errors);
+            Assert.IsNotNull(result);
+            Assert.AreEqual(true, result["ok"].Value<bool>());
+            restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Exactly(2));
+        }
+
+        [Test]
+        public void RaisesErrorOnlyAfterRetriesAreExhaustedOnMalformedResponse()
+        {
+            var htmlPage = "<!DOCTYPE html><html><head><title>Tradier API</title></head></html>";
+            var errors = new List<BrokerageMessageEvent>();
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>()))
+                .Returns(() => CreateResponse(htmlPage));
+
+            var brokerage = CreateBrokerageWithRestClient(restClient.Object, errors);
+            var result = InvokeExecute<JObject>(brokerage, TradierApiRequestType.Standard, max: 1);
+
+            // with max == 1: attempt 0 retries, attempt 1 exhausts retries and raises the fatal JsonError
+            Assert.IsNull(result);
+            Assert.AreEqual(1, errors.Count);
+            Assert.AreEqual("JsonError", errors[0].Code);
+            restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Exactly(2));
+        }
+
+        private static IRestResponse CreateResponse(string content)
+        {
+            return new RestResponse
+            {
+                Content = content,
+                StatusCode = HttpStatusCode.OK,
+                ResponseStatus = ResponseStatus.Completed
+            };
+        }
+
+        // Builds a brokerage with just the state Execute needs (rest client + rate gate), skipping the heavy Initialize
+        // (license validation, timers, streaming threads) that a full construction would trigger.
+        private static TradierBrokerage CreateBrokerageWithRestClient(IRestClient restClient, List<BrokerageMessageEvent> errors)
+        {
+            var brokerage = new TradierBrokerage();
+            brokerage.Message += (_, e) =>
+            {
+                if (e.Type == BrokerageMessageType.Error)
+                {
+                    errors.Add(e);
+                }
+            };
+
+            SetPrivateField(typeof(BaseWebsocketsBrokerage), brokerage, "_restClient", restClient);
+            SetPrivateField(typeof(TradierBrokerage), brokerage, "_rateLimitNextRequest",
+                new Dictionary<TradierApiRequestType, RateGate>
+                {
+                    { TradierApiRequestType.Standard, new RateGate(1, TimeSpan.FromMilliseconds(1)) }
+                });
+
+            return brokerage;
+        }
+
+        private static T InvokeExecute<T>(TradierBrokerage brokerage, TradierApiRequestType type, int max) where T : new()
+        {
+            var method = typeof(TradierBrokerage)
+                .GetMethod("Execute", BindingFlags.NonPublic | BindingFlags.Instance)
+                .MakeGenericMethod(typeof(T));
+            try
+            {
+                return (T)method.Invoke(brokerage, new object[] { new RestRequest("user/profile", Method.GET), type, "", 0, max });
+            }
+            catch (TargetInvocationException e)
+            {
+                throw e.InnerException;
+            }
+        }
+
+        private static void SetPrivateField(Type type, object instance, string name, object value)
+        {
+            type.GetField(name, BindingFlags.NonPublic | BindingFlags.Instance).SetValue(instance, value);
         }
 
         private class TestableTradierBrokerage : TradierBrokerage
