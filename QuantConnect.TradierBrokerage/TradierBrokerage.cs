@@ -1235,7 +1235,7 @@ Interval	Data Available (Open)	Data Available (All)
                         {
                             // verify we don't have them in the order provider
                             Log.Trace("TradierBrokerage.CheckForFills(): Verifying missing brokerage IDs: " + string.Join(",", localUnknownTradierOrderIDs));
-                            var orders = localUnknownTradierOrderIDs.Select(x => _orderProvider.GetOrdersByBrokerageId(x)?.SingleOrDefault()).Where(x => x != null);
+                            var orders = localUnknownTradierOrderIDs.Select(x => _orderProvider?.GetOrdersByBrokerageId(x)?.SingleOrDefault()).Where(x => x != null);
                             var stillUnknownOrderIDs = localUnknownTradierOrderIDs.Where(x => !orders.Any(y => y.BrokerId.Contains(x.ToStringInvariant()))).ToList();
                             if (stillUnknownOrderIDs.Count > 0)
                             {
