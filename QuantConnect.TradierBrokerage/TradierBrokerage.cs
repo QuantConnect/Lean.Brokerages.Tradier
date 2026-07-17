@@ -1237,7 +1237,9 @@ Interval	Data Available (Open)	Data Available (All)
                             Log.Trace("TradierBrokerage.CheckForFills(): Verifying missing brokerage IDs: " + string.Join(",", localUnknownTradierOrderIDs));
                             var orders = localUnknownTradierOrderIDs.Select(x => _orderProvider?.GetOrdersByBrokerageId(x)?.SingleOrDefault()).Where(x => x != null);
                             var stillUnknownOrderIDs = localUnknownTradierOrderIDs.Where(x => !orders.Any(y => y.BrokerId.Contains(x.ToStringInvariant()))).ToList();
-                            if (stillUnknownOrderIDs.Count > 0)
+                            // without an order provider (data queue handler only mode) no order can be ours,
+                            // so don't treat orders placed externally in the account as an error
+                            if (_orderProvider != null && stillUnknownOrderIDs.Count > 0)
                             {
                                 // fetch all rejected intraday orders within the last minute, we're going to exclude rejected orders from the error condition
                                 var recentOrders = GetIntradayAndPendingOrders().Where(x => x.Status == TradierOrderStatus.Rejected)
