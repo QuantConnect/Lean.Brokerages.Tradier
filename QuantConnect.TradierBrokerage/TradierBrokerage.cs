@@ -183,13 +183,27 @@ namespace QuantConnect.Brokerages.Tradier
 
                 if (!raw.IsSuccessful)
                 {
-                    // fault errors on authentication
+                    Log.Error($"TradierBrokerage.Execute(1): {request.Method} {RestClient.BuildUri(request)} failed. " +
+                        $"Status: {raw.StatusCode} ({raw.ResponseStatus}). " +
+                        $"Parameters: {string.Join(", ", parameters)}. " +
+                        $"Error: {raw.ErrorMessage}. " +
+                        $"Response: {raw.Content}");
+
+                    // fault errors, e.g. {"fault":{"faultstring":"Datastore Error","detail":{...}}}
                     if (raw.Content.Contains("\"fault\""))
                     {
                         var fault = JsonConvert.DeserializeObject<TradierFaultContainer>(raw.Content);
-                        OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "TradierFault", fault.Fault.Description));
+                        var description = fault?.Fault?.Description ?? raw.Content;
 
-                        return default(T);
+                        // fail fast only on non-retryable authentication faults (e.g. "Invalid Access Token");
+                        // transient backend faults (e.g. "Datastore Error") fall through to the retry logic below
+                        if (raw.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                            || description.Contains("Access Token", StringComparison.OrdinalIgnoreCase))
+                        {
+                            OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "TradierFault", description));
+
+                            return default(T);
+                        }
                     }
 
                     // this happens when we try to cancel a filled or cancelled order
@@ -222,7 +236,6 @@ namespace QuantConnect.Brokerages.Tradier
                         return new T();
                     }
 
-                    Log.Error($"{method}(2): Parameters: {string.Join(",", parameters)} Response: {raw.Content}");
                     if (attempts++ < max)
                     {
                         Log.Trace(method + "(2): Attempting again...");

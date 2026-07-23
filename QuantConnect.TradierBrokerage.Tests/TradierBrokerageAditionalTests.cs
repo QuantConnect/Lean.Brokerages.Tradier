@@ -119,12 +119,73 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Exactly(2));
         }
 
-        private static IRestResponse CreateResponse(string content)
+        // Tradier's gateway can transiently serve a JSON fault body (e.g. {"fault":{"faultstring":"Datastore Error"}})
+        // for backend problems. Only non-retryable authentication faults may fail fast; everything else must take the
+        // retry path (see https://github.com/QuantConnect/Lean.Brokerages.Tradier/issues/51).
+        [Test]
+        public void RetriesTransientFaultResponseInsteadOfFailing()
+        {
+            var faultBody = "{\"fault\":{\"faultstring\":\"Datastore Error\",\"detail\":{\"errorcode\":\"steps.servicecallout.ExecutionFailed\"}}}";
+            var errors = new List<BrokerageMessageEvent>();
+            var restClient = new Mock<IRestClient>();
+            restClient.SetupSequence(x => x.Execute(It.IsAny<IRestRequest>()))
+                .Returns(CreateResponse(faultBody, HttpStatusCode.InternalServerError))
+                .Returns(CreateResponse("{\"ok\":true}"));
+
+            var brokerage = CreateBrokerageWithRestClient(restClient.Object, errors);
+            var result = InvokeExecute<JObject>(brokerage, TradierApiRequestType.Standard, max: 3);
+
+            // the transient fault must not raise a fatal error before the retry, which succeeds and returns the payload
+            Assert.IsEmpty(errors);
+            Assert.IsNotNull(result);
+            Assert.AreEqual(true, result["ok"].Value<bool>());
+            restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Exactly(2));
+        }
+
+        [Test]
+        public void RaisesErrorOnlyAfterRetriesAreExhaustedOnTransientFault()
+        {
+            var faultBody = "{\"fault\":{\"faultstring\":\"Datastore Error\",\"detail\":{\"errorcode\":\"steps.servicecallout.ExecutionFailed\"}}}";
+            var errors = new List<BrokerageMessageEvent>();
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>()))
+                .Returns(() => CreateResponse(faultBody, HttpStatusCode.InternalServerError));
+
+            var brokerage = CreateBrokerageWithRestClient(restClient.Object, errors);
+            var result = InvokeExecute<JObject>(brokerage, TradierApiRequestType.Standard, max: 1);
+
+            // with max == 1: attempt 0 retries, attempt 1 exhausts retries and raises the fatal error
+            Assert.IsNull(result);
+            Assert.AreEqual(1, errors.Count);
+            Assert.IsTrue(errors[0].Message.Contains("Datastore Error"));
+            restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Exactly(2));
+        }
+
+        [TestCase("{\"fault\":{\"faultstring\":\"Invalid Access Token\",\"detail\":{\"errorcode\":\"keymanagement.service.invalid_access_token\"}}}", HttpStatusCode.Unauthorized)]
+        [TestCase("{\"fault\":{\"faultstring\":\"Access Token expired\",\"detail\":{\"errorcode\":\"keymanagement.service.access_token_expired\"}}}", HttpStatusCode.InternalServerError)]
+        public void FailsFastOnAuthenticationFault(string faultBody, HttpStatusCode statusCode)
+        {
+            var errors = new List<BrokerageMessageEvent>();
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>()))
+                .Returns(() => CreateResponse(faultBody, statusCode));
+
+            var brokerage = CreateBrokerageWithRestClient(restClient.Object, errors);
+            var result = InvokeExecute<JObject>(brokerage, TradierApiRequestType.Standard, max: 3);
+
+            // authentication faults are not retryable: fail fast with a single fatal error and no retry
+            Assert.IsNull(result);
+            Assert.AreEqual(1, errors.Count);
+            Assert.AreEqual("TradierFault", errors[0].Code);
+            restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Once);
+        }
+
+        private static IRestResponse CreateResponse(string content, HttpStatusCode statusCode = HttpStatusCode.OK)
         {
             return new RestResponse
             {
                 Content = content,
-                StatusCode = HttpStatusCode.OK,
+                StatusCode = statusCode,
                 ResponseStatus = ResponseStatus.Completed
             };
         }
@@ -136,7 +197,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var brokerage = new TradierBrokerage();
             brokerage.Message += (_, e) =>
             {
-                if (e.Type == BrokerageMessageType.Error)
+                // OnMessage elevates NullResponse warnings to Error when the machine-local clock falls within
+                // US equity market hours; ignore them so these tests are deterministic regardless of run time
+                if (e.Type == BrokerageMessageType.Error && e.Code != "NullResponse")
                 {
                     errors.Add(e);
                 }
