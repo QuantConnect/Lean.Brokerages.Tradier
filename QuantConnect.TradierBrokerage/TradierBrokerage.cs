@@ -1275,7 +1275,10 @@ Interval	Data Available (Open)	Data Available (All)
                                     // if we still have unknown IDs then we've gotta bail on the algorithm
                                     var ids = string.Join(", ", stillUnknownOrderIDs);
                                     Log.Error("TradierBrokerage.CheckForFills(): Unable to verify all missing brokerage IDs: " + ids);
-                                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "UnknownOrderId", "Received unknown Tradier order id(s): " + ids));
+                                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "UnknownOrderId", "Received unknown Tradier order id(s): " + ids +
+                                        ". These orders were likely placed manually on the account. LEAN terminates live algorithms when it detects interference outside of the algorithm's control" +
+                                        " to avoid race conditions between the account owner and the algorithm, so avoid placing manual orders while the algorithm is running." +
+                                        " To adjust your holdings manually, place your trades through the QuantConnect IDE or LEAN CLI, or stop the algorithm, place your trades, and then redeploy."));
                                     return;
                                 }
                             }
