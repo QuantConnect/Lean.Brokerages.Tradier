@@ -1263,7 +1263,7 @@ Interval	Data Available (Open)	Data Available (All)
                             // so don't treat orders placed externally in the account as an error
                             if (_orderProvider != null && stillUnknownOrderIDs.Count > 0)
                             {
-                                var intradayOrders = GetIntradayAndPendingOrders().ToDictionary(x => x.Id);
+                                var intradayOrders = GetIntradayAndPendingOrders();
                                 if (intradayOrders.Count == 0)
                                 {
                                     // the request failed and already reported it, leave these ids unverified so we recheck them
@@ -1272,28 +1272,29 @@ Interval	Data Available (Open)	Data Available (All)
                                     return;
                                 }
 
-                                // orders the algorithm was offered and didn't accept, and orders we couldn't offer it at all
+                                // fetch all rejected intraday orders within the last minute, we're going to exclude rejected orders from the error
+                                // condition. We pull the orders every couple of seconds, so an older rejection can't be one of ours
+                                var recentOrders = intradayOrders.Where(x => x.Status == TradierOrderStatus.Rejected)
+                                    .Where(x => DateTime.UtcNow - x.TransactionDate < TimeSpan.FromMinutes(1)).ToHashSet(x => x.Id);
+
+                                // remove recently rejected orders, sometimes we'll get updates for these but we've already marked them as rejected
+                                stillUnknownOrderIDs.RemoveAll(x => recentOrders.Contains(x));
+
+                                // the remaining ones were placed outside of the algorithm: those the algorithm was
+                                // offered and didn't accept, and those we couldn't offer it at all
+                                var unknownOrders = intradayOrders.ToDictionary(x => x.Id);
                                 var notAcceptedOrderIDs = new HashSet<long>();
                                 var unprocessableOrderIDs = new HashSet<long>();
                                 foreach (var stillUnknownOrderID in stillUnknownOrderIDs)
                                 {
-                                    if (!intradayOrders.TryGetValue(stillUnknownOrderID, out var unknownOrder))
+                                    if (!unknownOrders.TryGetValue(stillUnknownOrderID, out var unknownOrder))
                                     {
                                         // we don't have the details of the order, so we can't offer it to the algorithm
                                         unprocessableOrderIDs.Add(stillUnknownOrderID);
                                         continue;
                                     }
 
-                                    // skip recently rejected orders, sometimes we'll get updates for these but we've
-                                    // already marked them as rejected. We pull the orders every couple of seconds, so
-                                    // an older rejection is not one of ours, it was placed outside of the algorithm
-                                    if (unknownOrder.Status == TradierOrderStatus.Rejected
-                                        && DateTime.UtcNow - unknownOrder.TransactionDate < TimeSpan.FromMinutes(1))
-                                    {
-                                        continue;
-                                    }
-
-                                    // the order was placed outside of the algorithm, let it decide whether to take ownership of it
+                                    // let the algorithm decide whether it wants to take ownership of the order
                                     switch (HandleBrokerageSideOrder(unknownOrder))
                                     {
                                         case BrokerageSideOrderResult.NotAccepted:
