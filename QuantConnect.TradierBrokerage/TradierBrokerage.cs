@@ -1263,22 +1263,44 @@ Interval	Data Available (Open)	Data Available (All)
                             // so don't treat orders placed externally in the account as an error
                             if (_orderProvider != null && stillUnknownOrderIDs.Count > 0)
                             {
-                                // fetch all rejected intraday orders within the last minute, we're going to exclude rejected orders from the error condition
-                                var recentOrders = GetIntradayAndPendingOrders().Where(x => x.Status == TradierOrderStatus.Rejected)
-                                    .Where(x => DateTime.UtcNow - x.TransactionDate < TimeSpan.FromMinutes(1)).ToHashSet(x => x.Id);
+                                var intradayOrders = GetIntradayAndPendingOrders().ToDictionary(x => x.Id);
+                                if (intradayOrders.Count == 0)
+                                {
+                                    // the request failed and already reported it, leave these ids unverified so we recheck them
+                                    Log.Trace("TradierBrokerage.CheckForFills(): No orders returned, will recheck the missing brokerage IDs: "
+                                        + string.Join(", ", stillUnknownOrderIDs));
+                                    return;
+                                }
 
-                                // remove recently rejected orders, sometimes we'll get updates for these but we've already marked them as rejected
-                                stillUnknownOrderIDs.RemoveAll(x => recentOrders.Contains(x));
+                                stillUnknownOrderIDs.RemoveAll(x =>
+                                {
+                                    if (!intradayOrders.TryGetValue(x, out var unknownOrder))
+                                    {
+                                        // we can't inspect the order, so we won't dismiss it
+                                        return false;
+                                    }
+
+                                    // rejected orders never made it into the account, there's nothing to track
+                                    if (unknownOrder.Status == TradierOrderStatus.Rejected)
+                                    {
+                                        return true;
+                                    }
+
+                                    // the order was placed outside of the algorithm, let it decide whether to take ownership of it
+                                    return TryHandleBrokerageSideOrder(unknownOrder);
+                                });
 
                                 if (stillUnknownOrderIDs.Count > 0)
                                 {
-                                    // if we still have unknown IDs then we've gotta bail on the algorithm
+                                    // the algorithm didn't take ownership of these orders, so we've gotta bail on it
                                     var ids = string.Join(", ", stillUnknownOrderIDs);
                                     Log.Error("TradierBrokerage.CheckForFills(): Unable to verify all missing brokerage IDs: " + ids);
                                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "UnknownOrderId", "Received unknown Tradier order id(s): " + ids +
                                         ". These orders were likely placed manually on the account. LEAN terminates live algorithms when it detects interference outside of the algorithm's control" +
                                         " to avoid race conditions between the account owner and the algorithm, so avoid placing manual orders while the algorithm is running." +
-                                        " To adjust your holdings manually, place your trades through the QuantConnect IDE or LEAN CLI, or stop the algorithm, place your trades, and then redeploy."));
+                                        " To adjust your holdings manually, place your trades through the QuantConnect IDE or LEAN CLI, or stop the algorithm, place your trades, and then redeploy." +
+                                        " If instead you want the algorithm to take ownership of the orders placed outside of it, set a custom brokerage message handler with" +
+                                        " 'SetBrokerageMessageHandler(...)' implementing a 'HandleOrder' method that returns true for the orders the algorithm should track."));
                                     return;
                                 }
                             }
@@ -1291,8 +1313,8 @@ Interval	Data Available (Open)	Data Available (All)
                         }
                         catch (Exception err)
                         {
-                            // we need to recheck these order ids since we failed, so add them back to the set
-                            foreach (var id in localUnknownTradierOrderIDs) _unknownTradierOrderIDs.Add(id);
+                            // we need to recheck these order ids since we failed, leaving them unverified is enough for the next
+                            // poll to fire a new task for them, adding them back to the set would block that task from firing
 
                             Log.Error(err);
                             OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "UnknownIdResolution", "An error occurred while trying to resolve unknown Tradier order IDs: " + err));
@@ -1319,6 +1341,78 @@ Interval	Data Available (Open)	Data Available (All)
                 && x.Value.TransactionDate.ToUniversalTime() > _initializationDateTime.ToUniversalTime()
                 // we don't have a record of it in our last 10k filled orders
                 && !_filledTradierOrderIDs.Contains(x.Key);
+        }
+
+        /// <summary>
+        /// Handles an order that was placed directly in the brokerage account, outside of the algorithm.
+        /// The algorithm's brokerage message handler decides whether it takes ownership of the order, if it does
+        /// we start tracking it so we emit its order events just like we do for the orders we placed ourselves.
+        /// </summary>
+        /// <param name="brokerageSideOrder">The Tradier order the algorithm is unaware of</param>
+        /// <returns>True if the algorithm took ownership of the order and we started tracking it, false otherwise</returns>
+        private bool TryHandleBrokerageSideOrder(TradierOrder brokerageSideOrder)
+        {
+            Order leanOrder;
+            try
+            {
+                leanOrder = ConvertOrder(brokerageSideOrder);
+            }
+            catch (Exception err)
+            {
+                Log.Error(err, $"TradierBrokerage.TryHandleBrokerageSideOrder(): failed to convert Tradier order {brokerageSideOrder.Id}");
+                return false;
+            }
+
+            // the transaction handler assigns the Lean order id and marks the order as submitted when it accepts it
+            leanOrder.Status = OrderStatus.New;
+            OnNewBrokerageOrderNotification(new NewBrokerageOrderNotificationEventArgs(leanOrder));
+
+            if (leanOrder.Id == 0)
+            {
+                // the algorithm's brokerage message handler didn't accept the order, so we won't track it
+                return false;
+            }
+
+            OnOrderEvent(new OrderEvent(leanOrder, DateTime.UtcNow, OrderFee.Zero, "Order was submitted outside of the algorithm")
+            { Status = OrderStatus.Submitted });
+
+            // start tracking the order from a state with no execution progress, this way the regular fill detection
+            // emits the fills and the final status the order might already have
+            var cachedOrder = new TradierCachedOpenOrder(new TradierOrder
+            {
+                Id = brokerageSideOrder.Id,
+                Type = brokerageSideOrder.Type,
+                Symbol = brokerageSideOrder.Symbol,
+                OptionSymbol = brokerageSideOrder.OptionSymbol,
+                Direction = brokerageSideOrder.Direction,
+                Quantity = brokerageSideOrder.Quantity,
+                // we just reported the order as submitted, keeping the status of orders that are still open avoids
+                // emitting an event for a status change that never happened
+                Status = OrderIsOpen(brokerageSideOrder) ? brokerageSideOrder.Status : TradierOrderStatus.Submitted,
+                Duration = brokerageSideOrder.Duration,
+                Price = brokerageSideOrder.Price,
+                AverageFillPrice = 0m,
+                QuantityExecuted = 0m,
+                LastFillPrice = 0m,
+                LastFillQuantity = 0m,
+                RemainingQuantity = brokerageSideOrder.Quantity,
+                CreatedDate = brokerageSideOrder.CreatedDate,
+                TransactionDate = brokerageSideOrder.TransactionDate,
+                Class = brokerageSideOrder.Class,
+                NumberOfLegs = brokerageSideOrder.NumberOfLegs,
+                Legs = brokerageSideOrder.Legs
+            });
+            _cachedOpenOrdersByTradierOrderID[brokerageSideOrder.Id] = cachedOrder;
+
+            ProcessPotentiallyUpdatedOrder(cachedOrder, brokerageSideOrder);
+
+            // if the order is still open, update the cached value
+            if (!OrderIsClosed(brokerageSideOrder))
+            {
+                UpdateCachedOpenOrder(brokerageSideOrder.Id, brokerageSideOrder);
+            }
+
+            return true;
         }
 
         private void ProcessPotentiallyUpdatedOrder(TradierCachedOpenOrder cachedOrder, TradierOrder updatedOrder)
