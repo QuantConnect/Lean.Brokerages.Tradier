@@ -1272,28 +1272,53 @@ Interval	Data Available (Open)	Data Available (All)
                                     return;
                                 }
 
-                                stillUnknownOrderIDs.RemoveAll(x =>
+                                // orders the algorithm was offered and didn't accept, and orders we couldn't offer it at all
+                                var !intradayOrders.TryGetValue(x, out var unknownOrder) = new List<long>();
+                                var unprocessableOrderIDs = new List<long>();
+                                foreach (var stillUnknownOrderID in stillUnknownOrderIDs)
                                 {
-                                    if (!intradayOrders.TryGetValue(x, out var unknownOrder))
+                                    if (!intradayOrders.TryGetValue(stillUnknownOrderID, out var unknownOrder))
                                     {
-                                        // we can't inspect the order, so we won't dismiss it
-                                        return false;
+                                        // we don't have the details of the order, so we can't offer it to the algorithm
+                                        unprocessableOrderIDs.Add(stillUnknownOrderID);
+                                        continue;
                                     }
 
                                     // rejected orders never made it into the account, there's nothing to track
                                     if (unknownOrder.Status == TradierOrderStatus.Rejected)
                                     {
-                                        return true;
+                                        continue;
                                     }
 
                                     // the order was placed outside of the algorithm, let it decide whether to take ownership of it
-                                    return TryHandleBrokerageSideOrder(unknownOrder);
-                                });
+                                    switch (HandleBrokerageSideOrder(unknownOrder))
+                                    {
+                                        case BrokerageSideOrderResult.NotAccepted:
+                                            notAcceptedOrderIDs.Add(stillUnknownOrderID);
+                                            break;
 
-                                if (stillUnknownOrderIDs.Count > 0)
+                                        case BrokerageSideOrderResult.Unprocessable:
+                                            unprocessableOrderIDs.Add(stillUnknownOrderID);
+                                            break;
+                                    }
+                                }
+
+                                if (unprocessableOrderIDs.Count > 0)
+                                {
+                                    // we couldn't hand these orders over to the algorithm, so we've gotta bail on it
+                                    var ids = string.Join(", ", unprocessableOrderIDs);
+                                    Log.Error("TradierBrokerage.CheckForFills(): Unable to process the missing brokerage IDs: " + ids);
+                                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "UnprocessableOrderId", "Unable to process the Tradier order id(s): " + ids +
+                                        ". Their details could not be fetched from Tradier or they cannot be represented as LEAN orders, so the algorithm cannot track them." +
+                                        " LEAN terminates live algorithms when it detects interference outside of the algorithm's control to avoid race conditions between" +
+                                        " the account owner and the algorithm, so avoid placing manual orders while the algorithm is running."));
+                                    return;
+                                }
+
+                                if (notAcceptedOrderIDs.Count > 0)
                                 {
                                     // the algorithm didn't take ownership of these orders, so we've gotta bail on it
-                                    var ids = string.Join(", ", stillUnknownOrderIDs);
+                                    var ids = string.Join(", ", notAcceptedOrderIDs);
                                     Log.Error("TradierBrokerage.CheckForFills(): Unable to verify all missing brokerage IDs: " + ids);
                                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "UnknownOrderId", "Received unknown Tradier order id(s): " + ids +
                                         ". These orders were likely placed manually on the account. LEAN terminates live algorithms when it detects interference outside of the algorithm's control" +
@@ -1349,8 +1374,8 @@ Interval	Data Available (Open)	Data Available (All)
         /// we start tracking it so we emit its order events just like we do for the orders we placed ourselves.
         /// </summary>
         /// <param name="brokerageSideOrder">The Tradier order the algorithm is unaware of</param>
-        /// <returns>True if the algorithm took ownership of the order and we started tracking it, false otherwise</returns>
-        private bool TryHandleBrokerageSideOrder(TradierOrder brokerageSideOrder)
+        /// <returns>The outcome of offering the order to the algorithm</returns>
+        private BrokerageSideOrderResult HandleBrokerageSideOrder(TradierOrder brokerageSideOrder)
         {
             Order leanOrder;
             try
@@ -1359,8 +1384,8 @@ Interval	Data Available (Open)	Data Available (All)
             }
             catch (Exception err)
             {
-                Log.Error(err, $"TradierBrokerage.TryHandleBrokerageSideOrder(): failed to convert Tradier order {brokerageSideOrder.Id}");
-                return false;
+                Log.Error(err, $"TradierBrokerage.HandleBrokerageSideOrder(): failed to convert Tradier order {brokerageSideOrder.Id}");
+                return BrokerageSideOrderResult.Unprocessable;
             }
 
             // the transaction handler assigns the Lean order id and marks the order as submitted when it accepts it
@@ -1370,7 +1395,7 @@ Interval	Data Available (Open)	Data Available (All)
             if (leanOrder.Id == 0)
             {
                 // the algorithm's brokerage message handler didn't accept the order, so we won't track it
-                return false;
+                return BrokerageSideOrderResult.NotAccepted;
             }
 
             OnOrderEvent(new OrderEvent(leanOrder, DateTime.UtcNow, OrderFee.Zero, "Order was submitted outside of the algorithm")
@@ -1412,7 +1437,7 @@ Interval	Data Available (Open)	Data Available (All)
                 UpdateCachedOpenOrder(brokerageSideOrder.Id, brokerageSideOrder);
             }
 
-            return true;
+            return BrokerageSideOrderResult.Tracked;
         }
 
         private void ProcessPotentiallyUpdatedOrder(TradierCachedOpenOrder cachedOrder, TradierOrder updatedOrder)
@@ -2036,6 +2061,27 @@ Interval	Data Available (Open)	Data Available (All)
                 }
                 return Contingents.Dequeue();
             }
+        }
+
+        /// <summary>
+        /// The outcome of offering an order placed outside of the algorithm to it
+        /// </summary>
+        private enum BrokerageSideOrderResult
+        {
+            /// <summary>
+            /// The algorithm took ownership of the order and we started tracking it
+            /// </summary>
+            Tracked,
+
+            /// <summary>
+            /// The algorithm was offered the order and didn't accept it
+            /// </summary>
+            NotAccepted,
+
+            /// <summary>
+            /// The order couldn't be offered to the algorithm, we failed to convert it into a Lean order
+            /// </summary>
+            Unprocessable
         }
 
         private class TradierCachedOpenOrder

@@ -204,7 +204,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 orderProvider.Add(e.Order);
             };
 
-            Assert.IsTrue(InvokeTryHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)));
+            Assert.AreEqual("Tracked", InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)));
 
             Assert.IsNotNull(notifiedOrder);
             Assert.AreEqual(OrderType.Market, notifiedOrder.Type);
@@ -230,7 +230,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
             brokerage.NewBrokerageOrderNotification += (_, e) => orderProvider.Add(e.Order);
 
-            Assert.IsTrue(InvokeTryHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Open)));
+            Assert.AreEqual("Tracked", InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Open)));
 
             // the order is still open, so it's only reported as submitted, no fill event yet
             Assert.AreEqual(1, orderEvents.Count);
@@ -241,7 +241,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         }
 
         // When the order is not accepted, which is what the default brokerage message handler does, the order is left
-        // untracked and reported back as unhandled so the caller can fail the algorithm like it did before
+        // untracked and reported back as not accepted so the caller can fail the algorithm like it did before
         [Test]
         public void DoesNotTrackOrdersPlacedOutsideOfTheAlgorithmWhenTheyAreNotAccepted()
         {
@@ -254,19 +254,41 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             // the default brokerage message handler ignores these orders, leaving the Lean order id unset
             brokerage.NewBrokerageOrderNotification += (_, e) => notified = true;
 
-            Assert.IsFalse(InvokeTryHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)));
+            Assert.AreEqual("NotAccepted", InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)));
 
             Assert.IsTrue(notified);
             Assert.IsEmpty(orderEvents);
             Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
         }
 
-        private static TradierOrder CreateBrokerageSideOrder(TradierOrderStatus status, decimal quantityExecuted = 0m)
+        // Orders LEAN cannot represent, like the multileg only order types, are never offered to the algorithm, so they
+        // are reported apart from the ones it declined: telling the user to accept them in a handler wouldn't help
+        [Test]
+        public void ReportsOrdersItCannotConvertAsUnprocessable()
+        {
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider());
+
+            var orderEvents = new List<OrderEvent>();
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            var notified = false;
+            brokerage.NewBrokerageOrderNotification += (_, e) => notified = true;
+
+            var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open, type: TradierOrderType.Credit);
+            Assert.AreEqual("Unprocessable", InvokeHandleBrokerageSideOrder(brokerage, brokerageSideOrder));
+
+            Assert.IsFalse(notified);
+            Assert.IsEmpty(orderEvents);
+            Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        private static TradierOrder CreateBrokerageSideOrder(TradierOrderStatus status, decimal quantityExecuted = 0m,
+            TradierOrderType type = TradierOrderType.Market)
         {
             return new TradierOrder
             {
                 Id = BrokerageSideOrderId,
-                Type = TradierOrderType.Market,
+                Type = type,
                 Symbol = "SPY",
                 Direction = TradierOrderDirection.Buy,
                 Quantity = 10m,
@@ -307,12 +329,13 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 .GetValue(brokerage);
         }
 
-        private static bool InvokeTryHandleBrokerageSideOrder(TradierBrokerage brokerage, TradierOrder brokerageSideOrder)
+        // the result is a private enum, so it's compared by name
+        private static string InvokeHandleBrokerageSideOrder(TradierBrokerage brokerage, TradierOrder brokerageSideOrder)
         {
-            var method = typeof(TradierBrokerage).GetMethod("TryHandleBrokerageSideOrder", BindingFlags.NonPublic | BindingFlags.Instance);
+            var method = typeof(TradierBrokerage).GetMethod("HandleBrokerageSideOrder", BindingFlags.NonPublic | BindingFlags.Instance);
             try
             {
-                return (bool)method.Invoke(brokerage, [brokerageSideOrder]);
+                return method.Invoke(brokerage, [brokerageSideOrder]).ToString();
             }
             catch (TargetInvocationException e)
             {
