@@ -1284,8 +1284,11 @@ Interval	Data Available (Open)	Data Available (All)
                                         continue;
                                     }
 
-                                    // rejected orders never made it into the account, there's nothing to track
-                                    if (unknownOrder.Status == TradierOrderStatus.Rejected)
+                                    // skip recently rejected orders, sometimes we'll get updates for these but we've
+                                    // already marked them as rejected. We pull the orders every couple of seconds, so
+                                    // an older rejection is not one of ours, it was placed outside of the algorithm
+                                    if (unknownOrder.Status == TradierOrderStatus.Rejected
+                                        && DateTime.UtcNow - unknownOrder.TransactionDate < TimeSpan.FromMinutes(1))
                                     {
                                         continue;
                                     }
