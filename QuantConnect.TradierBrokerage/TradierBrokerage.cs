@@ -1273,8 +1273,8 @@ Interval	Data Available (Open)	Data Available (All)
                                 }
 
                                 // orders the algorithm was offered and didn't accept, and orders we couldn't offer it at all
-                                var !intradayOrders.TryGetValue(x, out var unknownOrder) = new List<long>();
-                                var unprocessableOrderIDs = new List<long>();
+                                var notAcceptedOrderIDs = new HashSet<long>();
+                                var unprocessableOrderIDs = new HashSet<long>();
                                 foreach (var stillUnknownOrderID in stillUnknownOrderIDs)
                                 {
                                     if (!intradayOrders.TryGetValue(stillUnknownOrderID, out var unknownOrder))
