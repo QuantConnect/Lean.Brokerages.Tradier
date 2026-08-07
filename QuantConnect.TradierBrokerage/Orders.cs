@@ -139,6 +139,15 @@ namespace QuantConnect.Brokerages.Tradier
         /// Closed position trade summary
         public TradierOrder()
         { }
+
+        /// <summary>
+        /// Creates a shallow copy of this order
+        /// </summary>
+        /// <returns>A new instance holding the same values</returns>
+        public TradierOrder Clone()
+        {
+            return (TradierOrder)MemberwiseClone();
+        }
     }
 
     /// <summary>
