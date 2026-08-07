@@ -109,6 +109,9 @@ namespace QuantConnect.Brokerages.Tradier
 
         private readonly HashSet<long> _unknownTradierOrderIDs = new HashSet<long>();
         private readonly FixedSizeHashQueue<long> _verifiedUnknownTradierOrderIDs = new FixedSizeHashQueue<long>(1000);
+
+        // the ids we last reported as pending a recheck, we only trace them again when they change
+        private string _uncheckedTradierOrderIDs;
         private readonly FixedSizeHashQueue<int> _cancelledQcOrderIDs = new FixedSizeHashQueue<int>(10000);
         private string _restApiUrl = "https://api.tradier.com/v1/";
         private string _restApiSandboxUrl = "https://sandbox.tradier.com/v1/";
@@ -1266,11 +1269,17 @@ Interval	Data Available (Open)	Data Available (All)
                                 var intradayOrders = GetIntradayAndPendingOrders();
                                 if (intradayOrders.Count == 0)
                                 {
-                                    // the request failed and already reported it, leave these ids unverified so we recheck them
-                                    Log.Trace("TradierBrokerage.CheckForFills(): No orders returned, will recheck the missing brokerage IDs: "
-                                        + string.Join(", ", stillUnknownOrderIDs));
+                                    // the request failed and already reported it, leave these ids unverified so we recheck them.
+                                    // every poll rechecks them, so only trace when the ids change, else we would flood the log
+                                    var uncheckedOrderIDs = string.Join(", ", stillUnknownOrderIDs);
+                                    if (_uncheckedTradierOrderIDs != uncheckedOrderIDs)
+                                    {
+                                        _uncheckedTradierOrderIDs = uncheckedOrderIDs;
+                                        Log.Trace("TradierBrokerage.CheckForFills(): No orders returned, will recheck the missing brokerage IDs: " + uncheckedOrderIDs);
+                                    }
                                     return;
                                 }
+                                _uncheckedTradierOrderIDs = null;
 
                                 // fetch all rejected intraday orders within the last minute, we're going to exclude rejected orders from the error
                                 // condition. We pull the orders every couple of seconds, so an older rejection can't be one of ours
@@ -1402,43 +1411,33 @@ Interval	Data Available (Open)	Data Available (All)
                 return BrokerageSideOrderResult.NotAccepted;
             }
 
-            OnOrderEvent(new OrderEvent(leanOrder, DateTime.UtcNow, OrderFee.Zero, "Order was submitted outside of the algorithm")
+            OnOrderEvent(new OrderEvent(leanOrder, DateTime.UtcNow, OrderFee.Zero, "Order was submitted outside Lean")
             { Status = OrderStatus.Submitted });
 
-            // start tracking the order from a state with no execution progress, this way the regular fill detection
-            // emits the fills and the final status the order might already have
-            var cachedOrder = new TradierCachedOpenOrder(new TradierOrder
+            // diff the order against a clone of itself with no execution progress, this way the regular fill
+            // detection emits the fills and the final status the order might already have
+            var brokerageSideOrderClone = brokerageSideOrder.Clone();
+            brokerageSideOrderClone.AverageFillPrice = 0m;
+            brokerageSideOrderClone.QuantityExecuted = 0m;
+            brokerageSideOrderClone.LastFillPrice = 0m;
+            brokerageSideOrderClone.LastFillQuantity = 0m;
+            brokerageSideOrderClone.RemainingQuantity = brokerageSideOrder.Quantity;
+            if (OrderIsClosed(brokerageSideOrder))
             {
-                Id = brokerageSideOrder.Id,
-                Type = brokerageSideOrder.Type,
-                Symbol = brokerageSideOrder.Symbol,
-                OptionSymbol = brokerageSideOrder.OptionSymbol,
-                Direction = brokerageSideOrder.Direction,
-                Quantity = brokerageSideOrder.Quantity,
-                // we just reported the order as submitted, keeping the status of orders that are still open avoids
-                // emitting an event for a status change that never happened
-                Status = OrderIsOpen(brokerageSideOrder) ? brokerageSideOrder.Status : TradierOrderStatus.Submitted,
-                Duration = brokerageSideOrder.Duration,
-                Price = brokerageSideOrder.Price,
-                AverageFillPrice = 0m,
-                QuantityExecuted = 0m,
-                LastFillPrice = 0m,
-                LastFillQuantity = 0m,
-                RemainingQuantity = brokerageSideOrder.Quantity,
-                CreatedDate = brokerageSideOrder.CreatedDate,
-                TransactionDate = brokerageSideOrder.TransactionDate,
-                Class = brokerageSideOrder.Class,
-                NumberOfLegs = brokerageSideOrder.NumberOfLegs,
-                Legs = brokerageSideOrder.Legs
-            });
-            _cachedOpenOrdersByTradierOrderID[brokerageSideOrder.Id] = cachedOrder;
+                // we just reported the order as submitted, keeping the status of the orders that are still
+                // open avoids emitting an event for a status change that never happened
+                brokerageSideOrderClone.Status = TradierOrderStatus.Submitted;
+            }
 
+            var cachedOrder = new TradierCachedOpenOrder(brokerageSideOrderClone);
             ProcessPotentiallyUpdatedOrder(cachedOrder, brokerageSideOrder);
 
-            // if the order is still open, update the cached value
+            // only start tracking the order once it holds its real state, caching it any earlier would expose
+            // the clone to the fill polling, which would emit the fills we just emitted again
             if (!OrderIsClosed(brokerageSideOrder))
             {
-                UpdateCachedOpenOrder(brokerageSideOrder.Id, brokerageSideOrder);
+                cachedOrder.Order = brokerageSideOrder;
+                _cachedOpenOrdersByTradierOrderID[brokerageSideOrder.Id] = cachedOrder;
             }
 
             return BrokerageSideOrderResult.Tracked;
@@ -2065,27 +2064,6 @@ Interval	Data Available (Open)	Data Available (All)
                 }
                 return Contingents.Dequeue();
             }
-        }
-
-        /// <summary>
-        /// The outcome of offering an order placed outside of the algorithm to it
-        /// </summary>
-        private enum BrokerageSideOrderResult
-        {
-            /// <summary>
-            /// The algorithm took ownership of the order and we started tracking it
-            /// </summary>
-            Tracked,
-
-            /// <summary>
-            /// The algorithm was offered the order and didn't accept it
-            /// </summary>
-            NotAccepted,
-
-            /// <summary>
-            /// The order couldn't be offered to the algorithm, we failed to convert it into a Lean order
-            /// </summary>
-            Unprocessable
         }
 
         private class TradierCachedOpenOrder
