@@ -29,6 +29,7 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.2" />
   </ItemGroup>
   <ItemGroup>
-	<PackageReference Include="QuantConnect.Brokerages" Version="2.5.*" />
+    <ProjectReference Include="..\..\Lean\Brokerages\QuantConnect.Brokerages.csproj" Condition=" '$(Configuration)' == 'Debug' " />
+    <PackageReference Include="QuantConnect.Brokerages" Version="2.5.*" Condition=" '$(Configuration)' == 'Release' " />
   </ItemGroup>
 </Project>
