@@ -35,7 +35,8 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using QuantConnect.Brokerages.CrossZero;
-using QuantConnect.Brokerages.Services;
+using QuantConnect.Brokerages.Services.OrderPolling;
+using QuantConnect.Brokerages.Services.OrderPolling.Models;
 using System.Net.NetworkInformation;
 using System.Runtime.Serialization;
 using System.Security.Cryptography;
@@ -771,7 +772,7 @@ Interval	Data Available (Open)	Data Available (All)
             foreach (var openOrder in openOrders)
             {
                 // watch the adopted order seeded with its current state, so the poll reports only what changes from here on
-                OrderPollingService.Watch(openOrder.Id.ToStringInvariant(), ToOrderState(openOrder));
+                OrderPollingService.Subscribe(openOrder.Id.ToStringInvariant(), ToOrderState(openOrder));
                 orders.Add(ConvertOrder(openOrder));
             }
 
@@ -982,12 +983,7 @@ Interval	Data Available (Open)	Data Available (All)
                 {
                     // record the cancel as already reported: the id leaves the read list, and a sweep that
                     // read the order just before this cannot report the cancel or its fills a second time
-                    OrderPollingService.UpdateOrderState(orderID, new BrokerOrderState
-                    {
-                        BrokerageOrderId = orderID,
-                        Status = OrderStatus.Canceled,
-                        TimeUtc = DateTime.UtcNow
-                    });
+                    OrderPollingService.UpdateOrderState(orderID, new BrokerageOrderSnapshot(orderID, OrderStatus.Canceled));
                     _crossZeroFirstLegQuantityByBrokerageId.TryRemove(orderID, out _);
                     OnOrderEvent(new OrderEvent(order, DateTime.UtcNow, OrderFee.Zero, "Tradier Order Event")
                     { Status = OrderStatus.Canceled });
@@ -1087,19 +1083,14 @@ Interval	Data Available (Open)	Data Available (All)
 
                 // watch the order before returning, so it's guaranteed to be in the poll registry when we poll for
                 // updates; the seed says the submit was already sent to Lean, so the poll never repeats it
-                var seedState = new BrokerOrderState
-                {
-                    BrokerageOrderId = response.Order.Id.ToStringInvariant(),
-                    Status = OrderStatus.Submitted,
-                    TimeUtc = DateTime.UtcNow
-                };
+                var seedState = new BrokerageOrderSnapshot(response.Order.Id.ToStringInvariant(), OrderStatus.Submitted);
                 if (_crossZeroFirstLegQuantityByLeanOrderId.TryRemove(order.QCOrder.Id, out var firstLegQuantity))
                 {
                     // the second leg of a cross-zero order starts from what the first leg already filled
                     seedState.FilledQuantity = firstLegQuantity;
                     _crossZeroFirstLegQuantityByBrokerageId[seedState.BrokerageOrderId] = firstLegQuantity;
                 }
-                OrderPollingService.Watch(seedState.BrokerageOrderId, seedState);
+                OrderPollingService.Subscribe(seedState.BrokerageOrderId, seedState);
             }
             else
             {
@@ -1148,7 +1139,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// <param name="brokerageId">The Tradier order id to read.</param>
         /// <returns>The state of the order, or null when Tradier does not know the id - the read is
         /// simply retried on the next sweep.</returns>
-        private BrokerOrderState ReadOrderState(string brokerageId)
+        private BrokerageOrderSnapshot ReadOrderState(string brokerageId)
         {
             var brokerageOrder = GetOrder(Parse.Long(brokerageId));
             if (brokerageOrder == null || brokerageOrder.Id == 0)
@@ -1165,15 +1156,10 @@ Interval	Data Available (Open)	Data Available (All)
         /// Converts one Tradier order into the state the shared diff understands.
         /// </summary>
         /// <param name="brokerageOrder">The order read from the Tradier orders endpoint.</param>
-        private BrokerOrderState ToOrderState(TradierOrder brokerageOrder)
+        private BrokerageOrderSnapshot ToOrderState(TradierOrder brokerageOrder)
         {
-            var orderState = new BrokerOrderState
-            {
-                BrokerageOrderId = brokerageOrder.Id.ToStringInvariant(),
-                Status = ConvertStatus(brokerageOrder.Status),
-                TimeUtc = brokerageOrder.TransactionDate.ToUniversalTime(),
-                Message = brokerageOrder.ReasonDescription
-            };
+            var orderState = new BrokerageOrderSnapshot(brokerageOrder.Id.ToStringInvariant(), ConvertStatus(brokerageOrder.Status),
+                brokerageOrder.TransactionDate.ToUniversalTime(), message: brokerageOrder.ReasonDescription);
 
             if (brokerageOrder.QuantityExecuted > 0)
             {
@@ -1196,7 +1182,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// </summary>
         /// <param name="brokerageOrder">The order read from the Tradier orders endpoint.</param>
         /// <param name="orderState">The state <see cref="ToOrderState"/> built from it.</param>
-        private void HandleClosedOrderState(TradierOrder brokerageOrder, BrokerOrderState orderState)
+        private void HandleClosedOrderState(TradierOrder brokerageOrder, BrokerageOrderSnapshot orderState)
         {
             if (OrderIsOpen(brokerageOrder))
             {
@@ -1729,7 +1715,7 @@ Interval	Data Available (Open)	Data Available (All)
 
             // one read per watched order per sweep, each passing the standard rate gate above; nothing
             // is requested while no order is watched
-            CreateOrderPollingService(ReadOrderState, messageHandler: null, _orderProvider, pollInterval: TimeSpan.FromMilliseconds(interval));
+            InitializeOrderPollingService(ReadOrderState, messageHandler: null, _orderProvider, pollInterval: TimeSpan.FromMilliseconds(interval));
             OrderPollingService.Start();
             WebSocket.Error += (sender, error) =>
             {
