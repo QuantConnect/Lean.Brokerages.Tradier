@@ -174,6 +174,7 @@ namespace QuantConnect.Brokerages.Tradier
             {
                 if (attempt != 0)
                 {
+                    Thread.Sleep(3000);
                     Log.Trace(method + "(): Begin attempt " + attempt);
                 }
 
@@ -242,8 +243,6 @@ namespace QuantConnect.Brokerages.Tradier
                     if (attempt < max)
                     {
                         Log.Trace(method + "(2): Attempting again...");
-                        // this will retry on time outs and other transport exception
-                        Thread.Sleep(3000);
                         continue;
                     }
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, raw.StatusCode.ToStringInvariant(), raw.Content));
@@ -276,7 +275,6 @@ namespace QuantConnect.Brokerages.Tradier
                     if (attempt < max)
                     {
                         Log.Trace(method + "(JsonError): Attempting again...");
-                        Thread.Sleep(3000);
                         continue;
                     }
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "JsonError", $"Error deserializing message: {raw.Content} Error: {e.Message}"));
@@ -287,8 +285,6 @@ namespace QuantConnect.Brokerages.Tradier
                     if (attempt < max)
                     {
                         Log.Trace(method + "(3): Attempting again...");
-                        // this will retry on time outs and other transport exception
-                        Thread.Sleep(3000);
                         continue;
                     }
 
@@ -304,8 +300,6 @@ namespace QuantConnect.Brokerages.Tradier
                     if (attempt < max)
                     {
                         Log.Trace(method + "(4): Attempting again...");
-                        // this will retry on time outs and other transport exception
-                        Thread.Sleep(3000);
                         continue;
                     }
 
@@ -1848,7 +1842,6 @@ Interval	Data Available (Open)	Data Available (All)
             var interval = _useSandbox ? 1000 : 500;
 
             // Tradier limits, per minute and per access token (https://docs.tradier.com/docs/rate-limiting):
-            // trading 60, standard and market data 120 in production and 60 in sandbox. We stay about 10% below them
             var requestsPerMinute = _useSandbox ? 55 : 110;
             _rateLimitNextRequest = new Dictionary<TradierApiRequestType, RateGate>
             {
