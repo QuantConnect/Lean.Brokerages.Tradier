@@ -76,9 +76,6 @@ namespace QuantConnect.Brokerages.Tradier
         private readonly SymbolPropertiesDatabase _symbolPropertiesDatabase = SymbolPropertiesDatabase.FromDataFolder();
         private TradierSymbolMapper _symbolMapper;
 
-        private string _previousResponseRaw = "";
-        private readonly object _lockAccessCredentials = new object();
-
         // polling timer for checking for fill events
         private Timer _orderFillTimer;
 
@@ -160,26 +157,32 @@ namespace QuantConnect.Brokerages.Tradier
         /// <summary>
         /// Execute a authenticated call:
         /// </summary>
-        private T Execute<T>(RestRequest request, TradierApiRequestType type, string rootName = "", int attempts = 0, int max = 10) where T : new()
+        private T Execute<T>(RestRequest request, TradierApiRequestType type, string rootName = "", int max = 10) where T : new()
         {
-            var response = default(T);
+            return Execute<T>(request, type, out _, rootName, max);
+        }
 
+        /// <summary>
+        /// Execute a authenticated call and hand back the raw body of the last response:
+        /// </summary>
+        private T Execute<T>(RestRequest request, TradierApiRequestType type, out string rawContent, string rootName = "", int max = 10) where T : new()
+        {
             var method = "TradierBrokerage.Execute." + request.Resource;
             var parameters = request.Parameters.Select(x => x.Name + ": " + x.Value);
 
-            if (attempts != 0)
+            for (var attempt = 0; ; attempt++)
             {
-                Log.Trace(method + "(): Begin attempt " + attempts);
-            }
+                if (attempt != 0)
+                {
+                    Log.Trace(method + "(): Begin attempt " + attempt);
+                }
 
-            lock (_lockAccessCredentials)
-            {
                 //Wait for the API rate limiting
                 _rateLimitNextRequest[type].WaitToProceed();
 
                 //Send the request:
                 var raw = RestClient.Execute(request);
-                _previousResponseRaw = raw.Content;
+                rawContent = raw.Content;
 
                 if (!raw.IsSuccessful)
                 {
@@ -236,18 +239,19 @@ namespace QuantConnect.Brokerages.Tradier
                         return new T();
                     }
 
-                    if (attempts++ < max)
+                    if (attempt < max)
                     {
                         Log.Trace(method + "(2): Attempting again...");
                         // this will retry on time outs and other transport exception
                         Thread.Sleep(3000);
-                        return Execute<T>(request, type, rootName, attempts, max);
+                        continue;
                     }
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, raw.StatusCode.ToStringInvariant(), raw.Content));
 
                     return default(T);
                 }
 
+                var response = default(T);
                 try
                 {
                     if (!string.IsNullOrEmpty(rootName))
@@ -269,23 +273,23 @@ namespace QuantConnect.Brokerages.Tradier
                     // a transiently malformed body (e.g. an HTML maintenance/error page served instead of JSON) can fail
                     // deserialization; treat it like the other transient failures and retry before raising a fatal error
                     Log.Error($"{method}(JsonError): Parameters: {string.Join(",", parameters)} Response: {raw.Content} Error: {e.Message}");
-                    if (attempts++ < max)
+                    if (attempt < max)
                     {
                         Log.Trace(method + "(JsonError): Attempting again...");
                         Thread.Sleep(3000);
-                        return Execute<T>(request, type, rootName, attempts, max);
+                        continue;
                     }
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, "JsonError", $"Error deserializing message: {raw.Content} Error: {e.Message}"));
                 }
 
                 if (raw.ErrorException != null)
                 {
-                    if (attempts++ < max)
+                    if (attempt < max)
                     {
                         Log.Trace(method + "(3): Attempting again...");
                         // this will retry on time outs and other transport exception
                         Thread.Sleep(3000);
-                        return Execute<T>(request, type, rootName, attempts, max);
+                        continue;
                     }
 
                     Log.Trace(method + "(3): Parameters: " + string.Join(",", parameters));
@@ -294,24 +298,24 @@ namespace QuantConnect.Brokerages.Tradier
                     const string message = "Error retrieving response.  Check inner details for more info.";
                     throw new ApplicationException(message, raw.ErrorException);
                 }
-            }
 
-            if (response == null)
-            {
-                if (attempts++ < max)
+                if (response == null)
                 {
-                    Log.Trace(method + "(4): Attempting again...");
-                    // this will retry on time outs and other transport exception
-                    Thread.Sleep(3000);
-                    return Execute<T>(request, type, rootName, attempts, max);
+                    if (attempt < max)
+                    {
+                        Log.Trace(method + "(4): Attempting again...");
+                        // this will retry on time outs and other transport exception
+                        Thread.Sleep(3000);
+                        continue;
+                    }
+
+                    Log.Trace(method + "(4): Parameters: " + string.Join(",", parameters));
+                    Log.Error(method + "(4): NULL Response: Raw Response: " + raw.Content);
+                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "NullResponse", raw.Content));
                 }
 
-                Log.Trace(method + "(4): Parameters: " + string.Join(",", parameters));
-                Log.Error(method + "(4): NULL Response: Raw Response: " + _previousResponseRaw);
-                OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "NullResponse", _previousResponseRaw));
+                return response;
             }
-
-            return response;
         }
 
         /// <summary>
@@ -449,11 +453,12 @@ namespace QuantConnect.Brokerages.Tradier
             TradierOrderDirection direction,
             string symbol,
             decimal quantity,
-            decimal price = 0,
-            decimal stop = 0,
-            string optionSymbol = "",
-            TradierOrderType type = TradierOrderType.Market,
-            TradierOrderDuration duration = TradierOrderDuration.GTC)
+            decimal price,
+            decimal stop,
+            string optionSymbol,
+            TradierOrderType type,
+            TradierOrderDuration duration,
+            out string rawContent)
         {
             //Compose the request:
             var request = new RestRequest($"accounts/{_accountId}/orders");
@@ -474,7 +479,7 @@ namespace QuantConnect.Brokerages.Tradier
             //Set Method:
             request.Method = Method.POST;
 
-            return Execute<TradierOrderResponse>(request, TradierApiRequestType.Orders);
+            return Execute<TradierOrderResponse>(request, TradierApiRequestType.Orders, out rawContent);
         }
 
         /// <summary>
@@ -1081,7 +1086,8 @@ Interval	Data Available (Open)	Data Available (All)
                 order.Stop,
                 order.OptionSymbol,
                 order.Type,
-                order.Duration
+                order.Duration,
+                out var rawContent
                 );
 
             // if no errors, add to our open orders collection
@@ -1128,7 +1134,7 @@ Interval	Data Available (Open)	Data Available (All)
                 OnOrderEvent(new OrderEvent(order.QCOrder, DateTime.UtcNow, OrderFee.Zero)
                 { Status = OrderStatus.Invalid });
 
-                string message = _previousResponseRaw;
+                string message = rawContent;
                 if (response != null && response.Errors != null && !response.Errors.Errors.IsNullOrEmpty())
                 {
                     message = "Order " + order.QCOrder.Id + ": " + string.Join(Environment.NewLine, response.Errors.Errors);
@@ -1840,11 +1846,14 @@ Interval	Data Available (Open)	Data Available (All)
 
             // we can poll orders once a second in sandbox and twice a second in production
             var interval = _useSandbox ? 1000 : 500;
+
+            // Tradier limits, per minute and per access token (https://docs.tradier.com/docs/rate-limiting):
+            var requestsPerMinute = _useSandbox ? 60 : 120;
             _rateLimitNextRequest = new Dictionary<TradierApiRequestType, RateGate>
             {
-                { TradierApiRequestType.Data, new RateGate(1, TimeSpan.FromMilliseconds(interval))},
-                { TradierApiRequestType.Standard, new RateGate(1, TimeSpan.FromMilliseconds(interval))},
-                { TradierApiRequestType.Orders, new RateGate(1, TimeSpan.FromMilliseconds(1000))},
+                { TradierApiRequestType.Data, new RateGate(requestsPerMinute, TimeSpan.FromMinutes(1))},
+                { TradierApiRequestType.Standard, new RateGate(requestsPerMinute, TimeSpan.FromMinutes(1))},
+                { TradierApiRequestType.Orders, new RateGate(60, TimeSpan.FromMinutes(1))},
             };
 
             _orderFillTimer = new Timer(state => CheckForFills(), null, interval, interval);

@@ -25,6 +25,7 @@ using RestSharp;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Threading;
@@ -232,7 +233,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.IsTrue(firstAttemptSent.Wait(TimeSpan.FromSeconds(5)), "the rejected request never sent its first attempt");
 
             // the account request must not wait for that sleep
-            var accountRequest = Task.Run(brokerage.GetUserProfile);
+            var accountRequest = Task.Run(brokerage.GetCashBalance);
             Assert.IsTrue(accountRequest.Wait(TimeSpan.FromSeconds(1.5)), "the account request waited on the retrying rejected request");
             Assert.IsNotNull(accountRequest.Result);
 
@@ -307,11 +308,12 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         private static T InvokeExecute<T>(TradierBrokerage brokerage, TradierApiRequestType type, int max, string resource = "user/profile") where T : new()
         {
             var method = typeof(TradierBrokerage)
-                .GetMethod("Execute", BindingFlags.NonPublic | BindingFlags.Instance)
+                .GetMethods(BindingFlags.NonPublic | BindingFlags.Instance)
+                .Single(x => x.Name == "Execute" && !x.GetParameters().Any(p => p.IsOut))
                 .MakeGenericMethod(typeof(T));
             try
             {
-                return (T)method.Invoke(brokerage, new object[] { new RestRequest(resource, Method.GET), type, "", 0, max });
+                return (T)method.Invoke(brokerage, new object[] { new RestRequest(resource, Method.GET), type, "", max });
             }
             catch (TargetInvocationException e)
             {
