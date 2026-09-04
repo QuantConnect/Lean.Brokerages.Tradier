@@ -14,6 +14,7 @@
 */
 
 using Moq;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using QuantConnect.Brokerages;
@@ -25,6 +26,7 @@ using QuantConnect.Securities;
 using QuantConnect.Util;
 using RestSharp;
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -39,6 +41,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
     [TestFixture]
     public class TradierBrokerageAditionalTests
     {
+        private const long BrokerageSideOrderId = 1234;
+        private static readonly string[] BrokerageSideOrderBrokerIds = [BrokerageSideOrderId.ToStringInvariant()];
+
         [Test]
         public void InitializesFactoryFromComposer()
         {
@@ -185,6 +190,221 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.AreEqual(1, errors.Count);
             Assert.AreEqual("TradierFault", errors[0].Code);
             restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Once);
+        }
+
+        // Orders placed directly in the Tradier account, outside of the algorithm, are offered to the algorithm through
+        // the NewBrokerageOrderNotification event, so a brokerage message handler can take ownership of them instead of
+        // the algorithm being terminated for interference it doesn't control
+        [Test]
+        public void NotifiesOrdersPlacedOutsideOfTheAlgorithm()
+        {
+            var orderProvider = new OrderProvider();
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider);
+
+            var orderEvents = new List<OrderEvent>();
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            Order notifiedOrder = null;
+            brokerage.NewBrokerageOrderNotification += (_, e) =>
+            {
+                notifiedOrder = e.Order;
+                // this is what the transaction handler does when the algorithm accepts the order: it assigns the Lean id
+                orderProvider.Add(e.Order);
+            };
+
+            Assert.AreEqual(BrokerageSideOrderResult.Tracked,
+                InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)));
+
+            Assert.IsNotNull(notifiedOrder);
+            Assert.AreEqual(OrderType.Market, notifiedOrder.Type);
+            Assert.AreEqual("SPY", notifiedOrder.Symbol.Value);
+            Assert.AreEqual(10m, notifiedOrder.Quantity);
+            CollectionAssert.AreEqual(BrokerageSideOrderBrokerIds, notifiedOrder.BrokerId);
+
+            // the order is first reported as submitted and then the fill it already had when we found it is emitted
+            Assert.AreEqual(2, orderEvents.Count);
+            Assert.AreEqual(OrderStatus.Submitted, orderEvents[0].Status);
+            Assert.AreEqual(OrderStatus.Filled, orderEvents[1].Status);
+            Assert.AreEqual(10m, orderEvents[1].FillQuantity);
+            Assert.AreEqual(123.45m, orderEvents[1].FillPrice);
+        }
+
+        [Test]
+        public void TracksOpenOrdersPlacedOutsideOfTheAlgorithmForFutureFills()
+        {
+            var orderProvider = new OrderProvider();
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider);
+
+            var orderEvents = new List<OrderEvent>();
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+            brokerage.NewBrokerageOrderNotification += (_, e) => orderProvider.Add(e.Order);
+
+            Assert.AreEqual(BrokerageSideOrderResult.Tracked,
+                InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Open)));
+
+            // the order is still open, so it's only reported as submitted, no fill event yet
+            Assert.AreEqual(1, orderEvents.Count);
+            Assert.AreEqual(OrderStatus.Submitted, orderEvents[0].Status);
+
+            // and it's cached so the regular fill detection picks up its fills from now on
+            Assert.IsTrue(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // When the order is not accepted, which is what the default brokerage message handler does, the order is left
+        // untracked and reported back as not accepted so the caller can fail the algorithm like it did before
+        [Test]
+        public void DoesNotTrackOrdersPlacedOutsideOfTheAlgorithmWhenTheyAreNotAccepted()
+        {
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider());
+
+            var orderEvents = new List<OrderEvent>();
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            var notified = false;
+            // the default brokerage message handler ignores these orders, leaving the Lean order id unset
+            brokerage.NewBrokerageOrderNotification += (_, e) => notified = true;
+
+            Assert.AreEqual(BrokerageSideOrderResult.NotAccepted,
+                InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)));
+
+            Assert.IsTrue(notified);
+            Assert.IsEmpty(orderEvents);
+            Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // Orders LEAN cannot represent, like the multileg only order types, are never offered to the algorithm, so they
+        // are reported apart from the ones it declined: telling the user to accept them in a handler wouldn't help
+        [TestCase(TradierOrderType.Credit)]
+        [TestCase(TradierOrderType.Debit)]
+        [TestCase(TradierOrderType.Even)]
+        public void ReportsUnsupportedOrderTypesAsUnprocessable(TradierOrderType unsupportedType)
+        {
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider());
+
+            var orderEvents = new List<OrderEvent>();
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            var notified = false;
+            brokerage.NewBrokerageOrderNotification += (_, e) => notified = true;
+
+            var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open, type: unsupportedType);
+            Assert.AreEqual(BrokerageSideOrderResult.Unprocessable, InvokeHandleBrokerageSideOrder(brokerage, brokerageSideOrder));
+
+            Assert.IsFalse(notified);
+            Assert.IsEmpty(orderEvents);
+            Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // A failed verification used to add the unknown ids back to the pending set, but a new verification task only
+        // fires when that set is empty, so a single failure disabled the unknown order detection for the rest of the run
+        [Test]
+        public void RechecksUnknownOrderIdsAfterAFailedVerification()
+        {
+            var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open);
+            // the order has to look newer than the brokerage instance for the fill polling to flag it
+            brokerageSideOrder.TransactionDate = DateTime.UtcNow.AddHours(1);
+
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => CreateResponse(SerializeOrders(brokerageSideOrder)));
+
+            var messages = new List<BrokerageMessageEvent>();
+            var verificationFailed = new ManualResetEvent(false);
+            var brokerage = CreateBrokerageWithRestClient(restClient.Object, new List<BrokerageMessageEvent>());
+            brokerage.Message += (_, e) =>
+            {
+                lock (messages) { messages.Add(e); }
+                if (e.Code == "UnknownIdResolution")
+                {
+                    verificationFailed.Set();
+                }
+            };
+
+            // fail the verification: the order provider lookup is the first thing the task does
+            var orderProvider = new Mock<IOrderProvider>();
+            orderProvider.Setup(x => x.GetOrdersByBrokerageId(It.IsAny<string>())).Throws(new Exception("Verification failed"));
+            SetPrivateField(typeof(TradierBrokerage), brokerage, "_orderProvider", orderProvider.Object);
+
+            var cachedOpenOrders = typeof(TradierBrokerage).GetField("_cachedOpenOrdersByTradierOrderID",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            cachedOpenOrders.SetValue(brokerage, Activator.CreateInstance(cachedOpenOrders.FieldType));
+
+            InvokeCheckForFills(brokerage);
+
+            // the verification runs two seconds after the order is flagged
+            Assert.IsTrue(verificationFailed.WaitOne(TimeSpan.FromSeconds(30)),
+                "The verification was never attempted. Messages: " + string.Join(" | ", messages.Select(x => $"{x.Type}:{x.Code}:{x.Message}")));
+
+            // leaving the id out of the pending set is what lets the next poll fire a new verification task for it
+            var pendingOrderIDs = (HashSet<long>)typeof(TradierBrokerage)
+                .GetField("_unknownTradierOrderIDs", BindingFlags.NonPublic | BindingFlags.Instance)
+                .GetValue(brokerage);
+            Assert.IsEmpty(pendingOrderIDs);
+        }
+
+        // the orders container is only meant to be deserialized, its converter doesn't write, so wrap the orders by hand
+        private static string SerializeOrders(params TradierOrder[] orders)
+        {
+            return $"{{\"orders\":{{\"order\":{JsonConvert.SerializeObject(orders)}}}}}";
+        }
+
+        private static TradierOrder CreateBrokerageSideOrder(TradierOrderStatus status, decimal quantityExecuted = 0m,
+            TradierOrderType type = TradierOrderType.Market)
+        {
+            return new TradierOrder
+            {
+                Id = BrokerageSideOrderId,
+                Type = type,
+                Symbol = "SPY",
+                Direction = TradierOrderDirection.Buy,
+                Quantity = 10m,
+                Status = status,
+                Duration = TradierOrderDuration.Day,
+                QuantityExecuted = quantityExecuted,
+                RemainingQuantity = 10m - quantityExecuted,
+                LastFillPrice = quantityExecuted > 0 ? 123.45m : 0m,
+                AverageFillPrice = quantityExecuted > 0 ? 123.45m : 0m,
+                Class = TradierOrderClass.Equity,
+                TransactionDate = DateTime.UtcNow,
+                CreatedDate = DateTime.UtcNow
+            };
+        }
+
+        // Builds a brokerage with just the state the brokerage side order handling needs, skipping the heavy Initialize
+        // (license validation, timers, streaming threads) that a full construction would trigger.
+        private static TradierBrokerage CreateBrokerageWithOrderTracking(OrderProvider orderProvider)
+        {
+            var brokerage = new TradierBrokerage();
+
+            SetPrivateField(typeof(TradierBrokerage), brokerage, "_orderProvider", orderProvider);
+            SetPrivateField(typeof(TradierBrokerage), brokerage, "_securityProvider", new SecurityProvider());
+            SetPrivateField(typeof(TradierBrokerage), brokerage, "_symbolMapper", new TradierSymbolMapper(_ => null));
+
+            // the cached open orders are keyed by a private type, so let reflection create the dictionary for us
+            var cachedOpenOrders = typeof(TradierBrokerage).GetField("_cachedOpenOrdersByTradierOrderID",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            cachedOpenOrders.SetValue(brokerage, Activator.CreateInstance(cachedOpenOrders.FieldType));
+
+            return brokerage;
+        }
+
+        private static IDictionary GetCachedOpenOrders(TradierBrokerage brokerage)
+        {
+            return (IDictionary)typeof(TradierBrokerage)
+                .GetField("_cachedOpenOrdersByTradierOrderID", BindingFlags.NonPublic | BindingFlags.Instance)
+                .GetValue(brokerage);
+        }
+
+        private static BrokerageSideOrderResult InvokeHandleBrokerageSideOrder(TradierBrokerage brokerage, TradierOrder brokerageSideOrder)
+        {
+            var method = typeof(TradierBrokerage).GetMethod("HandleBrokerageSideOrder", BindingFlags.NonPublic | BindingFlags.Instance);
+            try
+            {
+                return (BrokerageSideOrderResult)method.Invoke(brokerage, [brokerageSideOrder]);
+            }
+            catch (TargetInvocationException e)
+            {
+                throw e.InnerException;
+            }
         }
 
         [Test]
@@ -413,6 +633,19 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             try
             {
                 return (T)method.Invoke(brokerage, new object[] { new RestRequest(resource, Method.GET), type, "", max });
+            }
+            catch (TargetInvocationException e)
+            {
+                throw e.InnerException;
+            }
+        }
+
+        private static void InvokeCheckForFills(TradierBrokerage brokerage)
+        {
+            var method = typeof(TradierBrokerage).GetMethod("CheckForFills", BindingFlags.NonPublic | BindingFlags.Instance);
+            try
+            {
+                method.Invoke(brokerage, null);
             }
             catch (TargetInvocationException e)
             {
