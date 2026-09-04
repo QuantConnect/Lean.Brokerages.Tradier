@@ -263,7 +263,8 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         public void PlacesOrderBurstWithinTradingRateLimit()
         {
             var orderProvider = new OrderProvider();
-            using var brokerage = CreateLiveBrokerage(orderProvider, new SecurityProvider());
+            var securityProvider = new SecurityProvider();
+            using var brokerage = CreateLiveBrokerage(orderProvider, securityProvider);
             var messages = new ConcurrentBag<BrokerageMessageEvent>();
             brokerage.Message += (_, e) => messages.Add(e);
 
@@ -272,6 +273,11 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var orders = quotes.Select(quote => new LimitOrder(Symbol.Create(quote.Symbol, SecurityType.Equity, Market.USA), 1,
                 Math.Max(0.01m, Math.Round(quote.Last / 2, 2)), DateTime.UtcNow, properties: new OrderProperties { TimeInForce = TimeInForce.Day })).ToList();
             orders.ForEach(orderProvider.Add);
+            // create the securities up front, the test security provider is not thread safe
+            orders.ForEach(order => securityProvider.GetSecurity(order.Symbol));
+
+            // orders left open on these symbols by earlier runs do not count
+            var openBefore = brokerage.GetOpenOrders().Count(x => orders.Any(o => o.Symbol == x.Symbol));
 
             var stopwatch = Stopwatch.StartNew();
             var placements = orders.Select(order => Task.Run(() => (Order: order, Placed: brokerage.PlaceOrder(order), ReturnedAt: stopwatch.Elapsed))).ToArray();
@@ -296,7 +302,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.AreEqual(100, placed.Count, "not every order was placed: " + string.Join(" | ", messages.Where(x => x.Type != BrokerageMessageType.Information).Select(x => x.Message).Take(5)));
             Assert.AreEqual(100, brokerIds.Distinct().Count(), "duplicate broker ids");
             Assert.AreEqual(100, openById, "Tradier did not show every placed order as open");
-            Assert.AreEqual(100, openBySymbol, "Tradier shows extra orders on the burst symbols, possible duplicates");
+            Assert.AreEqual(openBefore + 100, openBySymbol, "Tradier shows extra orders on the burst symbols, possible duplicates");
             Assert.AreEqual(100, cancels.Count(x => x.Result), "not every order was cancelled");
         }
 
