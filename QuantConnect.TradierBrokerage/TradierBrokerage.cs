@@ -39,6 +39,7 @@ using System.Net.NetworkInformation;
 using System.Runtime.Serialization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -65,6 +66,10 @@ namespace QuantConnect.Brokerages.Tradier
             MarketHoursState.PostMarket,
             new TimeSpan(16, 0, 0),
             new TimeSpan(19, 55, 0));
+
+        // an HTML body means the reverse proxy answered, not the Tradier API, e.g. an nginx '502 Bad Gateway' page
+        private static readonly Regex HtmlResponseRegex = new (@"^\s*<(!doctype\s+html|html[\s>])",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private bool _useSandbox;
         private string _accountId;
@@ -245,7 +250,14 @@ namespace QuantConnect.Brokerages.Tradier
                         Log.Trace(method + "(2): Attempting again...");
                         continue;
                     }
-                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, raw.StatusCode.ToStringInvariant(), raw.Content));
+                    // this body becomes the user's runtime error message: a proxy's HTML page is noise, log it only
+                    var detail = HtmlResponseRegex.IsMatch(raw.Content ?? string.Empty)
+                        ? "Tradier's API is likely temporarily unavailable, please contact support if it persists."
+                        : $"Response: {raw.Content}";
+
+                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, raw.StatusCode.ToStringInvariant(),
+                        $"Tradier returned {raw.StatusCode} for {request.Method} {request.Resource} and the request " +
+                        $"still failed after {max} retries. {detail}"));
 
                     return default(T);
                 }

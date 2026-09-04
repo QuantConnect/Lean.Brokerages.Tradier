@@ -307,6 +307,39 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.AreEqual(100, cancels.Count(x => x.Result), "not every order was cancelled");
         }
 
+        [TestCase("<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>", true)]
+        [TestCase("<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body></body></html>", true)]
+        [TestCase("An error occurred while communicating with the backend.", false)]
+        [TestCase("{\"errors\":{\"error\":\"Something bad happened\"}}", false)]
+        public void ReplacesProxyHtmlPageWithActionableMessageAfterRetriesAreExhausted(string body, bool isProxyHtml)
+        {
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => CreateResponse(body, HttpStatusCode.BadGateway));
+
+            var brokerage = CreateBrokerageWithRestClient(restClient.Object, []);
+            var messages = new List<BrokerageMessageEvent>();
+            brokerage.Message += (_, e) => messages.Add(e);
+            var result = InvokeExecute<JObject>(brokerage, TradierApiRequestType.Standard, max: 1);
+
+            Assert.IsNull(result);
+            Assert.AreEqual(1, messages.Count);
+            Assert.AreEqual(BrokerageMessageType.Error, messages[0].Type);
+
+            var message = messages[0].Message;
+            Assert.AreEqual("BadGateway", messages[0].Code);
+            Assert.IsTrue(message.StartsWith("Tradier returned BadGateway for GET user/profile and the request still failed after 1 retries. "), message);
+            if (isProxyHtml)
+            {
+                Assert.IsTrue(message.Contains("Tradier's API is likely temporarily unavailable"), message);
+                Assert.IsFalse(message.Contains("<html"), message);
+            }
+            else
+            {
+                Assert.IsTrue(message.Contains($"Response: {body}"), message);
+            }
+            restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Exactly(2));
+        }
+
         private static IRestResponse CreateResponse(string content, HttpStatusCode statusCode = HttpStatusCode.OK)
         {
             return new RestResponse
