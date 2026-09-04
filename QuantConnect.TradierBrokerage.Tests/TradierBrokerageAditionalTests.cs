@@ -257,7 +257,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         };
 
         // Sends 100 limit orders to the real API at the same time, far below the market so nothing fills, then cancels them.
-        // Tradier allows 60 trading requests per minute: the first 60 should go out at once and the rest wait for free slots,
+        // Tradier allows 60 trading requests per minute and the plugin stays a bit below that: the first batch goes out at once and the rest wait for free slots,
         // with no 429 and no duplicate orders. Costs about 200 trading requests and 2 to 3 minutes.
         [Test, Explicit("Places and cancels 100 orders in the Tradier sandbox")]
         public void PlacesOrderBurstWithinTradingRateLimit()
@@ -284,8 +284,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.IsTrue(Task.WaitAll(placements, TimeSpan.FromMinutes(3)), "placing 100 orders did not finish in 3 minutes");
             var results = placements.Select(x => x.Result).OrderBy(x => x.ReturnedAt).ToList();
             var placed = results.Where(x => x.Placed).Select(x => x.Order).ToList();
+            var longestWait = Enumerable.Range(1, results.Count - 1).Select(i => (Request: i + 1, Wait: results[i].ReturnedAt - results[i - 1].ReturnedAt)).OrderByDescending(x => x.Wait).First();
             Log.Trace($"PlacesOrderBurstWithinTradingRateLimit(): placed {placed.Count}/100 in {stopwatch.Elapsed}; " +
-                $"request 1 returned at {results[0].ReturnedAt}, 60 at {results[59].ReturnedAt}, 61 at {results[60].ReturnedAt}, 100 at {results[^1].ReturnedAt}; " +
+                $"request 1 returned at {results[0].ReturnedAt}, 100 at {results[^1].ReturnedAt}; longest wait {longestWait.Wait} before request {longestWait.Request}; " +
                 $"message codes: {string.Join(", ", messages.Select(x => x.Code).Distinct())}");
 
             // what Tradier holds for these orders, before the clean up

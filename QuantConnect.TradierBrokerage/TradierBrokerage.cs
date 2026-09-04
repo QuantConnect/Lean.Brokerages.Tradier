@@ -1848,12 +1848,13 @@ Interval	Data Available (Open)	Data Available (All)
             var interval = _useSandbox ? 1000 : 500;
 
             // Tradier limits, per minute and per access token (https://docs.tradier.com/docs/rate-limiting):
-            var requestsPerMinute = _useSandbox ? 60 : 120;
+            // trading 60, standard and market data 120 in production and 60 in sandbox. We stay about 10% below them
+            var requestsPerMinute = _useSandbox ? 55 : 110;
             _rateLimitNextRequest = new Dictionary<TradierApiRequestType, RateGate>
             {
                 { TradierApiRequestType.Data, new RateGate(requestsPerMinute, TimeSpan.FromMinutes(1))},
                 { TradierApiRequestType.Standard, new RateGate(requestsPerMinute, TimeSpan.FromMinutes(1))},
-                { TradierApiRequestType.Orders, new RateGate(60, TimeSpan.FromMinutes(1))},
+                { TradierApiRequestType.Orders, new RateGate(55, TimeSpan.FromMinutes(1))},
             };
 
             _orderFillTimer = new Timer(state => CheckForFills(), null, interval, interval);
