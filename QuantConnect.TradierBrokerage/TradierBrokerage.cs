@@ -794,28 +794,13 @@ Interval	Data Available (Open)	Data Available (All)
         public override List<Order> GetOpenOrders()
         {
             var orders = new List<Order>();
+            TryGetIntradayAndPendingOrders(out var openOrders);
 
-            if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders))
+            foreach (var openOrder in openOrders.Where(OrderIsOpen))
             {
-                return orders;
-            }
-
-            var openOrders = intradayAndPendingOrders.Where(OrderIsOpen);
-            foreach (var openOrder in openOrders)
-            {
-                try
-                {
-                    orders.Add(ConvertOrder(openOrder));
-                }
-                catch (Exception err)
-                {
-                    // an order Lean can't represent shouldn't keep the algorithm from launching, the fill polling reports it
-                    Log.Error(err, $"skipping Tradier order {openOrder.Id}");
-                    continue;
-                }
-
                 // make sure our internal collection is up to date as well
                 UpdateCachedOpenOrder(openOrder.Id, openOrder);
+                orders.Add(ConvertOrder(openOrder));
             }
 
             return orders;
@@ -1178,10 +1163,7 @@ Interval	Data Available (Open)	Data Available (All)
                 {
                     Task.Run(() =>
                     {
-                        if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders))
-                        {
-                            return;
-                        }
+                        TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders);
                         var orders = intradayAndPendingOrders
                             .Where(x => x.Status == TradierOrderStatus.Rejected)
                             .Where(x => DateTime.UtcNow - x.TransactionDate < TimeSpan.FromSeconds(2));
