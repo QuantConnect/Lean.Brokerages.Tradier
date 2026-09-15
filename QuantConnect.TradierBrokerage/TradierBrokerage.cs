@@ -19,6 +19,7 @@ using Newtonsoft.Json.Linq;
 using QuantConnect.Api;
 using QuantConnect.Data;
 using QuantConnect.Interfaces;
+using QuantConnect.Lean.Engine.Results;
 using QuantConnect.Logging;
 using QuantConnect.Orders;
 using QuantConnect.Orders.Fees;
@@ -1918,6 +1919,9 @@ Interval	Data Available (Open)	Data Available (All)
             })
             { IsBackground = true };
             _subscribeThead.Start();
+
+            DeploymentDetailsHelper.Add("tradier-use-sandbox", useSandbox.ToStringInvariant());
+            DeploymentDetailsHelper.Add("tradier-account-id", accountId);
         }
 
         private readonly HashSet<string> ErrorsDuringMarketHours = new HashSet<string>
