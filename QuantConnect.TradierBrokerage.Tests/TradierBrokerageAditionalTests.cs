@@ -363,7 +363,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 orderProvider.Add(e.Order);
             };
 
-            Assert.AreEqual("Tracked",
+            Assert.AreEqual(BrokerageSideOrderResult.Tracked,
                 InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)));
 
             Assert.IsNotNull(notifiedOrder);
@@ -391,7 +391,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
             brokerage.NewBrokerageOrderNotification += (_, e) => orderProvider.Add(e.Order);
 
-            Assert.AreEqual("Tracked", InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Open)));
+            Assert.AreEqual(BrokerageSideOrderResult.Tracked, InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Open)));
 
             // the order is still open, so it's only reported as submitted, no fill event yet
             Assert.AreEqual(1, orderEvents.Count);
@@ -414,7 +414,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
             brokerage.NewBrokerageOrderNotification += (_, e) => orderProvider.Add(e.Order);
 
-            Assert.AreEqual("Tracked",
+            Assert.AreEqual(BrokerageSideOrderResult.Tracked,
                 InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(status, quantityExecuted: 4m)));
 
             Assert.AreEqual(3, orderEvents.Count);
@@ -440,7 +440,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             // the default brokerage message handler ignores these orders, leaving the Lean order id unset
             brokerage.NewBrokerageOrderNotification += (_, e) => notified = true;
 
-            Assert.AreEqual("NotAccepted",
+            Assert.AreEqual(BrokerageSideOrderResult.NotAccepted,
                 InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)));
 
             Assert.IsTrue(notified);
@@ -448,13 +448,16 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
         }
 
-        // Orders LEAN cannot represent are never offered to the algorithm: the multileg only order types, and the
-        // multileg classes, which Tradier reports on the underlying and would otherwise convert to a single order on it
+        // Orders with legs aren't supported yet, so they're never offered to the algorithm: the multileg only order types
+        // and the classes that hold several orders as legs, which would otherwise convert to a single order
         [TestCase(TradierOrderType.Credit, TradierOrderClass.Multileg)]
         [TestCase(TradierOrderType.Debit, TradierOrderClass.Multileg)]
         [TestCase(TradierOrderType.Even, TradierOrderClass.Multileg)]
         [TestCase(TradierOrderType.Market, TradierOrderClass.Multileg)]
         [TestCase(TradierOrderType.Limit, TradierOrderClass.Combo)]
+        [TestCase(TradierOrderType.Limit, TradierOrderClass.Oto)]
+        [TestCase(TradierOrderType.Limit, TradierOrderClass.Oco)]
+        [TestCase(TradierOrderType.Limit, TradierOrderClass.Otoco)]
         public void ReportsUnsupportedOrdersAsUnprocessable(TradierOrderType type, TradierOrderClass orderClass)
         {
             var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider());
@@ -466,11 +469,29 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.NewBrokerageOrderNotification += (_, e) => notified = true;
 
             var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open, type: type, orderClass: orderClass);
-            Assert.AreEqual("Unprocessable", InvokeHandleBrokerageSideOrder(brokerage, brokerageSideOrder));
+            Assert.AreEqual(BrokerageSideOrderResult.Unprocessable, InvokeHandleBrokerageSideOrder(brokerage, brokerageSideOrder));
 
             Assert.IsFalse(notified);
             Assert.IsEmpty(orderEvents);
             Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // An unknown class failed the whole orders response, so a single such order in the account broke the fill polling
+        [TestCase("oto", TradierOrderClass.Oto)]
+        [TestCase("oco", TradierOrderClass.Oco)]
+        [TestCase("otoco", TradierOrderClass.Otoco)]
+        public void DeserializesOrdersOfEveryClass(string orderClass, TradierOrderClass expected)
+        {
+            var json = $$$"""
+                {"orders":{"order":[{"id":{{{BrokerageSideOrderId}}},"status":"open","class":"{{{orderClass}}}","num_legs":2,
+                "leg":[{"id":1,"type":"limit","symbol":"SPY","side":"buy","quantity":1.0,"status":"open","duration":"day","price":1.0,"class":"equity"},
+                {"id":2,"type":"stop","symbol":"SPY","side":"sell","quantity":1.0,"status":"open","duration":"day","stop_price":0.5,"class":"equity"}]}]}}
+                """;
+
+            var orders = JsonConvert.DeserializeObject<TradierOrdersContainer>(json).Orders.Orders;
+
+            Assert.AreEqual(1, orders.Count);
+            Assert.AreEqual(expected, orders[0].Class);
         }
 
         // Declining the order is a valid outcome, so the algorithm keeps running: it's warned once and the id is
@@ -516,8 +537,49 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             // so the next poll neither flags it nor offers it again
             InvokeCheckForFills(brokerage);
-            Assert.IsEmpty(GetPrivateField<HashSet<long>>(typeof(TradierBrokerage), brokerage, "_unknownTradierOrderIDs"));
+            Assert.IsEmpty(GetPrivateField<UnknownOrderIds>(typeof(TradierBrokerage), brokerage, "_unknownTradierOrderIDs").ToHashSet());
             Assert.AreEqual(1, notifications);
+        }
+
+        // Like a declined order, an unsupported one doesn't stop the algorithm, it's only warned about
+        [Test]
+        public void WarnsAboutUnsupportedOrdersPlacedOutsideOfTheAlgorithm()
+        {
+            var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open, orderClass: TradierOrderClass.Otoco);
+            // the order has to look newer than the brokerage instance for the fill polling to flag it
+            brokerageSideOrder.TransactionDate = DateTime.UtcNow.AddHours(1);
+
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => CreateResponse(SerializeOrders(brokerageSideOrder)));
+
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider(), restClient.Object);
+
+            var notified = false;
+            brokerage.NewBrokerageOrderNotification += (_, e) => notified = true;
+
+            List<BrokerageMessageEvent> messages = [];
+            var warned = new ManualResetEvent(false);
+            brokerage.Message += (_, e) =>
+            {
+                lock (messages) { messages.Add(e); }
+                if (e.Code == "UnprocessableOrderId")
+                {
+                    warned.Set();
+                }
+            };
+
+            InvokeCheckForFills(brokerage);
+
+            Assert.IsTrue(warned.WaitOne(TimeSpan.FromSeconds(30)),
+                "The order was never reported. Messages: " + string.Join(" | ", messages.Select(x => $"{x.Type}:{x.Code}:{x.Message}")));
+            lock (messages)
+            {
+                Assert.IsEmpty(messages.Where(x => x.Type == BrokerageMessageType.Error));
+                var warning = messages.Single(x => x.Code == "UnprocessableOrderId");
+                Assert.AreEqual(BrokerageMessageType.Warning, warning.Type);
+                Assert.IsTrue(warning.Message.Contains(BrokerageSideOrderId.ToStringInvariant()), warning.Message);
+            }
+            Assert.IsFalse(notified);
         }
 
         // A failed verification used to add the unknown ids back to the pending set, but a new verification task only
@@ -617,10 +679,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             return GetPrivateField<IDictionary>(typeof(TradierBrokerage), brokerage, "_cachedOpenOrdersByTradierOrderID");
         }
 
-        // the result type is private to the brokerage, so compare its name
-        private static string InvokeHandleBrokerageSideOrder(TradierBrokerage brokerage, TradierOrder brokerageSideOrder)
+        private static BrokerageSideOrderResult InvokeHandleBrokerageSideOrder(TradierBrokerage brokerage, TradierOrder brokerageSideOrder)
         {
-            return InvokePrivate(brokerage, "HandleBrokerageSideOrder", brokerageSideOrder).ToString();
+            return (BrokerageSideOrderResult)InvokePrivate(brokerage, "HandleBrokerageSideOrder", brokerageSideOrder);
         }
 
         private static IRestResponse CreateResponse(string content, HttpStatusCode statusCode = HttpStatusCode.OK)
