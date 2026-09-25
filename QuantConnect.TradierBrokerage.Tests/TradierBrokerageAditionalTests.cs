@@ -582,6 +582,41 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.IsFalse(notified);
         }
 
+        // Open orders the plugin can't convert used to fail the launch, they're skipped with a warning instead
+        [Test]
+        public void SkipsUnsupportedOpenOrdersOnLaunch()
+        {
+            var supported = CreateBrokerageSideOrder(TradierOrderStatus.Open, type: TradierOrderType.Limit);
+            var unsupported = CreateBrokerageSideOrder(TradierOrderStatus.Open, orderClass: TradierOrderClass.Otoco);
+            unsupported.Id = BrokerageSideOrderId + 1;
+            // the stop price request returns no order, so its stop would be zero
+            var stopWithoutPrice = CreateBrokerageSideOrder(TradierOrderStatus.Open, type: TradierOrderType.StopMarket);
+            stopWithoutPrice.Id = BrokerageSideOrderId + 2;
+
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse(SerializeOrders(supported, unsupported, stopWithoutPrice)));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => !r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse("{}"));
+
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider(), restClient.Object);
+            SetPrivateField(typeof(TradierBrokerage), brokerage, "_accountId", "test");
+            List<BrokerageMessageEvent> messages = [];
+            brokerage.Message += (_, e) => messages.Add(e);
+
+            var openOrders = brokerage.GetOpenOrders();
+
+            Assert.AreEqual(1, openOrders.Count);
+            CollectionAssert.AreEqual(new[] { BrokerageSideOrderId.ToStringInvariant() }, openOrders[0].BrokerId);
+            var warning = messages.Single(x => x.Code == "UnprocessableOrderId");
+            Assert.AreEqual(BrokerageMessageType.Warning, warning.Type);
+            Assert.IsTrue(warning.Message.Contains($"{unsupported.Id}, {stopWithoutPrice.Id}"), warning.Message);
+            var cachedOpenOrders = GetCachedOpenOrders(brokerage);
+            Assert.IsTrue(cachedOpenOrders.Contains(supported.Id));
+            Assert.IsFalse(cachedOpenOrders.Contains(unsupported.Id));
+            Assert.IsFalse(cachedOpenOrders.Contains(stopWithoutPrice.Id));
+        }
+
         // A failed verification used to add the unknown ids back to the pending set, but a new verification task only
         // fires when that set is empty, so a single failure disabled the unknown order detection for the rest of the run
         [Test]

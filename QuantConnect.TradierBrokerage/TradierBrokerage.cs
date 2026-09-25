@@ -800,11 +800,25 @@ Interval	Data Available (Open)	Data Available (All)
                 return orders;
             }
 
+            List<long> unsupportedOrderIDs = [];
             foreach (var openOrder in openOrders.Where(OrderIsOpen))
             {
+                // skipped orders stay out of the cache too, else the fill polling would look for a Lean order that doesn't exist
+                if (!TryConvertOrder(openOrder, out var leanOrder))
+                {
+                    unsupportedOrderIDs.Add(openOrder.Id);
+                    continue;
+                }
+
                 // make sure our internal collection is up to date as well
                 UpdateCachedOpenOrder(openOrder.Id, openOrder);
-                orders.Add(ConvertOrder(openOrder));
+                orders.Add(leanOrder);
+            }
+
+            if (unsupportedOrderIDs.Count > 0)
+            {
+                OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "UnprocessableOrderId",
+                    $"Tradier open order id(s) {string.Join(", ", unsupportedOrderIDs)} are not supported, so they will not be tracked."));
             }
 
             return orders;
@@ -1403,7 +1417,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// <returns>The outcome of offering the order to the algorithm</returns>
         private BrokerageSideOrderResult HandleBrokerageSideOrder(TradierOrder brokerageSideOrder)
         {
-            if (!TryConvertBrokerageSideOrder(brokerageSideOrder, out var leanOrder))
+            if (!TryConvertOrder(brokerageSideOrder, out var leanOrder))
             {
                 return BrokerageSideOrderResult.Unprocessable;
             }
@@ -1421,15 +1435,15 @@ Interval	Data Available (Open)	Data Available (All)
             return BrokerageSideOrderResult.Tracked;
         }
 
-        private bool TryConvertBrokerageSideOrder(TradierOrder brokerageSideOrder, out Order leanOrder)
+        private bool TryConvertOrder(TradierOrder order, out Order leanOrder)
         {
             try
             {
-                leanOrder = ConvertOrder(brokerageSideOrder);
+                leanOrder = ConvertOrder(order);
             }
             catch (Exception err)
             {
-                Log.Error(err, $"failed to convert Tradier order {brokerageSideOrder.Id}");
+                Log.Error(err, $"failed to convert Tradier order {order.Id}");
                 leanOrder = null;
                 return false;
             }
@@ -1437,7 +1451,7 @@ Interval	Data Available (Open)	Data Available (All)
             // ConvertOrder reads the stop price with GetOrder, which returns a blank order when that request fails
             if (leanOrder is StopMarketOrder { StopPrice: 0 } or StopLimitOrder { StopPrice: 0 })
             {
-                Log.Error($"TradierBrokerage.TryConvertBrokerageSideOrder(): could not fetch the stop price of Tradier order {brokerageSideOrder.Id}");
+                Log.Error($"TradierBrokerage.TryConvertOrder(): could not fetch the stop price of Tradier order {order.Id}");
                 leanOrder = null;
                 return false;
             }
