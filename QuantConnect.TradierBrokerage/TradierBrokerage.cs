@@ -176,6 +176,10 @@ namespace QuantConnect.Brokerages.Tradier
             var method = "TradierBrokerage.Execute." + request.Resource;
             var parameters = request.Parameters.Select(x => x.Name + ": " + x.Value);
 
+            // a failed order placement may still have reached Tradier, retrying it could place the order twice
+            var isOrderPlacement = request.Method == Method.POST && type == TradierApiRequestType.Orders;
+            max = isOrderPlacement ? 0 : max;
+
             for (var attempt = 0; ; attempt++)
             {
                 if (attempt != 0)
@@ -251,6 +255,13 @@ namespace QuantConnect.Brokerages.Tradier
                         Log.Trace(method + "(2): Attempting again...");
                         continue;
                     }
+
+                    // TradierPlaceOrder invalidates the order and reports the failure, it doesn't have to stop the algorithm
+                    if (isOrderPlacement)
+                    {
+                        return default(T);
+                    }
+
                     // this body becomes the user's runtime error message: a proxy's HTML page is noise, log it only
                     var detail = HtmlResponseRegex.IsMatch(raw.Content ?? string.Empty)
                         ? "Tradier's API is likely temporarily unavailable, please contact support if it persists."
@@ -1348,22 +1359,15 @@ Interval	Data Available (Open)	Data Available (All)
                                     }
                                 }
 
+                                // like the other brokerages, these are only logged: they aren't tracked and don't stop the algorithm
                                 if (notAcceptedOrderIDs.Count > 0)
                                 {
-                                    // declining an order placed outside of the algorithm is a valid outcome, we just won't track it
-                                    var ids = string.Join(", ", notAcceptedOrderIDs);
-                                    Log.Trace("TradierBrokerage.CheckForFills(): Orders placed outside of the algorithm were not accepted by it: " + ids);
-                                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "UnknownOrderId",
-                                        $"Tradier order id(s) {ids} were placed outside of the algorithm and were not accepted by its brokerage message handler, so they will not be tracked."));
+                                    Log.Trace("TradierBrokerage.CheckForFills(): Orders placed outside of the algorithm were not accepted by it: " + string.Join(", ", notAcceptedOrderIDs));
                                 }
 
                                 if (unprocessableOrderIDs.Count > 0)
                                 {
-                                    // like an order the algorithm declines, one we couldn't offer to it doesn't stop it, it's just not tracked
-                                    var ids = string.Join(", ", unprocessableOrderIDs);
-                                    Log.Error("TradierBrokerage.CheckForFills(): Unable to process the missing brokerage IDs: " + ids);
-                                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "UnprocessableOrderId",
-                                        $"Tradier order id(s) {ids} were placed outside of the algorithm and are not supported, so they will not be tracked."));
+                                    Log.Error("TradierBrokerage.CheckForFills(): Unable to process the orders placed outside of the algorithm: " + string.Join(", ", unprocessableOrderIDs));
                                 }
                             }
 

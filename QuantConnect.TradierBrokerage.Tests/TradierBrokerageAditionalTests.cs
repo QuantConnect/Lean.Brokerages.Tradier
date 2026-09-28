@@ -130,6 +130,24 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Exactly(2));
         }
 
+        // A timed out order POST can still reach Tradier, so retrying it could place the order twice. The failure
+        // doesn't stop the algorithm, TradierPlaceOrder invalidates the order and reports it
+        [Test]
+        public void DoesNotRetryOrderPlacement()
+        {
+            var errors = new List<BrokerageMessageEvent>();
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>()))
+                .Returns(() => CreateResponse("Bad Gateway", HttpStatusCode.BadGateway));
+
+            var brokerage = CreateBrokerageWithRestClient(restClient.Object, errors);
+            var result = InvokeExecute<JObject>(brokerage, TradierApiRequestType.Orders, max: 3, resource: "accounts/test/orders", httpMethod: Method.POST);
+
+            Assert.IsNull(result);
+            Assert.IsEmpty(errors);
+            restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Once);
+        }
+
         // Tradier's gateway can transiently serve a JSON fault body (e.g. {"fault":{"faultstring":"Datastore Error"}})
         // for backend problems. Only non-retryable authentication faults may fail fast; everything else must take the
         // retry path (see https://github.com/QuantConnect/Lean.Brokerages.Tradier/issues/51).
@@ -494,10 +512,10 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.AreEqual(expected, orders[0].Class);
         }
 
-        // Declining the order is a valid outcome, so the algorithm keeps running: it's warned once and the id is
-        // marked as verified, else every poll would offer the order to the algorithm again
+        // Declining the order is a valid outcome, so the algorithm keeps running without a message, like with the other
+        // brokerages. The id is marked as verified, else every poll would offer the order to the algorithm again
         [Test]
-        public void WarnsOnceAboutOrdersPlacedOutsideOfTheAlgorithmThatItDoesNotAccept()
+        public void IgnoresOrdersPlacedOutsideOfTheAlgorithmThatItDoesNotAccept()
         {
             var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m);
             // the order has to look newer than the brokerage instance for the fill polling to flag it
@@ -512,28 +530,17 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.NewBrokerageOrderNotification += (_, e) => Interlocked.Increment(ref notifications);
 
             List<BrokerageMessageEvent> messages = [];
-            var warned = new ManualResetEvent(false);
-            brokerage.Message += (_, e) =>
-            {
-                lock (messages) { messages.Add(e); }
-                if (e.Code == "UnknownOrderId")
-                {
-                    warned.Set();
-                }
-            };
+            brokerage.Message += (_, e) => { lock (messages) { messages.Add(e); } };
 
             InvokeCheckForFills(brokerage);
 
-            Assert.IsTrue(warned.WaitOne(TimeSpan.FromSeconds(30)),
-                "The order was never reported. Messages: " + string.Join(" | ", messages.Select(x => $"{x.Type}:{x.Code}:{x.Message}")));
-            var warning = messages.Single(x => x.Code == "UnknownOrderId");
-            Assert.AreEqual(BrokerageMessageType.Warning, warning.Type);
-            Assert.IsTrue(warning.Message.Contains(BrokerageSideOrderId.ToStringInvariant()), warning.Message);
-            Assert.AreEqual(1, notifications);
-
-            // the id is verified right after the warning
             var verifiedOrderIDs = GetPrivateField<FixedSizeHashQueue<long>>(typeof(TradierBrokerage), brokerage, "_verifiedUnknownTradierOrderIDs");
-            Assert.IsTrue(SpinWait.SpinUntil(() => verifiedOrderIDs.Contains(BrokerageSideOrderId), TimeSpan.FromSeconds(5)));
+            Assert.IsTrue(SpinWait.SpinUntil(() => verifiedOrderIDs.Contains(BrokerageSideOrderId), TimeSpan.FromSeconds(30)));
+            lock (messages)
+            {
+                Assert.IsEmpty(messages, string.Join(" | ", messages.Select(x => $"{x.Type}:{x.Code}:{x.Message}")));
+            }
+            Assert.AreEqual(1, notifications);
 
             // so the next poll neither flags it nor offers it again
             InvokeCheckForFills(brokerage);
@@ -541,9 +548,9 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.AreEqual(1, notifications);
         }
 
-        // Like a declined order, an unsupported one doesn't stop the algorithm, it's only warned about
+        // Like a declined order, an unsupported one doesn't stop the algorithm, it's only logged
         [Test]
-        public void WarnsAboutUnsupportedOrdersPlacedOutsideOfTheAlgorithm()
+        public void IgnoresUnsupportedOrdersPlacedOutsideOfTheAlgorithm()
         {
             var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open, orderClass: TradierOrderClass.Otoco);
             // the order has to look newer than the brokerage instance for the fill polling to flag it
@@ -558,26 +565,15 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.NewBrokerageOrderNotification += (_, e) => notified = true;
 
             List<BrokerageMessageEvent> messages = [];
-            var warned = new ManualResetEvent(false);
-            brokerage.Message += (_, e) =>
-            {
-                lock (messages) { messages.Add(e); }
-                if (e.Code == "UnprocessableOrderId")
-                {
-                    warned.Set();
-                }
-            };
+            brokerage.Message += (_, e) => { lock (messages) { messages.Add(e); } };
 
             InvokeCheckForFills(brokerage);
 
-            Assert.IsTrue(warned.WaitOne(TimeSpan.FromSeconds(30)),
-                "The order was never reported. Messages: " + string.Join(" | ", messages.Select(x => $"{x.Type}:{x.Code}:{x.Message}")));
+            var verifiedOrderIDs = GetPrivateField<FixedSizeHashQueue<long>>(typeof(TradierBrokerage), brokerage, "_verifiedUnknownTradierOrderIDs");
+            Assert.IsTrue(SpinWait.SpinUntil(() => verifiedOrderIDs.Contains(BrokerageSideOrderId), TimeSpan.FromSeconds(30)));
             lock (messages)
             {
-                Assert.IsEmpty(messages.Where(x => x.Type == BrokerageMessageType.Error));
-                var warning = messages.Single(x => x.Code == "UnprocessableOrderId");
-                Assert.AreEqual(BrokerageMessageType.Warning, warning.Type);
-                Assert.IsTrue(warning.Message.Contains(BrokerageSideOrderId.ToStringInvariant()), warning.Message);
+                Assert.IsEmpty(messages, string.Join(" | ", messages.Select(x => $"{x.Type}:{x.Code}:{x.Message}")));
             }
             Assert.IsFalse(notified);
         }
@@ -783,7 +779,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             return signal;
         }
 
-        private static T InvokeExecute<T>(TradierBrokerage brokerage, TradierApiRequestType type, int max, string resource = "user/profile") where T : new()
+        private static T InvokeExecute<T>(TradierBrokerage brokerage, TradierApiRequestType type, int max, string resource = "user/profile", Method httpMethod = Method.GET) where T : new()
         {
             var method = typeof(TradierBrokerage)
                 .GetMethods(BindingFlags.NonPublic | BindingFlags.Instance)
@@ -791,7 +787,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 .MakeGenericMethod(typeof(T));
             try
             {
-                return (T)method.Invoke(brokerage, new object[] { new RestRequest(resource, Method.GET), type, "", max });
+                return (T)method.Invoke(brokerage, new object[] { new RestRequest(resource, httpMethod), type, "", max });
             }
             catch (TargetInvocationException e)
             {
