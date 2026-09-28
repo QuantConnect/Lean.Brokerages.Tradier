@@ -111,6 +111,8 @@ namespace QuantConnect.Brokerages.Tradier
         private readonly HashSet<long> _contingentReentranceGuardByQCOrderID = new HashSet<long>();
 
         private readonly UnknownOrderIds _unknownTradierOrderIDs = new();
+        // placements whose Tradier id isn't cached yet, the unknown order verification waits for them
+        private int _pendingOrderPlacements;
         private readonly FixedSizeHashQueue<long> _verifiedUnknownTradierOrderIDs = new FixedSizeHashQueue<long>(1000);
         private readonly FixedSizeHashQueue<int> _cancelledQcOrderIDs = new FixedSizeHashQueue<int>(10000);
         private string _restApiUrl = "https://api.tradier.com/v1/";
@@ -1109,6 +1111,20 @@ Interval	Data Available (Open)	Data Available (All)
         /// </returns>
         private TradierOrderResponse TradierPlaceOrder(TradierPlaceOrderRequest order, bool isSubmittedEvent = true)
         {
+            // until the response is back and the id cached, the fill polling can't tell this order from one placed outside
+            Interlocked.Increment(ref _pendingOrderPlacements);
+            try
+            {
+                return TradierPlaceOrderAndCache(order, isSubmittedEvent);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _pendingOrderPlacements);
+            }
+        }
+
+        private TradierOrderResponse TradierPlaceOrderAndCache(TradierPlaceOrderRequest order, bool isSubmittedEvent)
+        {
             string stopLimit = string.Empty;
             if (order.Price != 0 || order.Stop != 0)
             {
@@ -1301,6 +1317,13 @@ Interval	Data Available (Open)	Data Available (All)
                         var localUnknownTradierOrderIDs = _unknownTradierOrderIDs.ToHashSet();
                         try
                         {
+                            // one of these can be an order we're placing, we only learn its id from the response
+                            if (Volatile.Read(ref _pendingOrderPlacements) > 0)
+                            {
+                                Log.Trace("TradierBrokerage.CheckForFills(): Order placement in flight, the next poll rechecks the missing brokerage IDs: " + string.Join(",", localUnknownTradierOrderIDs));
+                                return;
+                            }
+
                             // verify we don't have them in the order provider
                             Log.Trace("TradierBrokerage.CheckForFills(): Verifying missing brokerage IDs: " + string.Join(",", localUnknownTradierOrderIDs));
                             List<long> stillUnknownOrderIDs = [];
@@ -1339,6 +1362,13 @@ Interval	Data Available (Open)	Data Available (All)
                                 {
                                     foreach (var stillUnknownOrderID in stillUnknownOrderIDs)
                                     {
+                                        // a placement that finished since the poll flagged it has the id cached or on its Lean order by now
+                                        if (_cachedOpenOrdersByTradierOrderID.ContainsKey(stillUnknownOrderID)
+                                            || !_orderProvider.GetOrdersByBrokerageId(stillUnknownOrderID).IsNullOrEmpty())
+                                        {
+                                            continue;
+                                        }
+
                                         if (!unknownOrders.TryGetValue(stillUnknownOrderID, out var unknownOrder))
                                         {
                                             // we don't have the details of the order, so we can't offer it to the algorithm
@@ -1356,18 +1386,24 @@ Interval	Data Available (Open)	Data Available (All)
                                                 unprocessableOrderIDs.Add(stillUnknownOrderID);
                                                 break;
                                         }
+                                        // verified as soon as it's offered: should a later order fail, this one isn't offered again
+                                        _verifiedUnknownTradierOrderIDs.Add(stillUnknownOrderID);
                                     }
                                 }
 
-                                // like the other brokerages, these are only logged: they aren't tracked and don't stop the algorithm
+                                // declining an order placed outside of the algorithm is a valid outcome, like the other brokerages we only log it
                                 if (notAcceptedOrderIDs.Count > 0)
                                 {
                                     Log.Trace("TradierBrokerage.CheckForFills(): Orders placed outside of the algorithm were not accepted by it: " + string.Join(", ", notAcceptedOrderIDs));
                                 }
 
+                                // an order we can't offer is worth a warning, the account holds an order Lean can't see; it doesn't stop the algorithm
                                 if (unprocessableOrderIDs.Count > 0)
                                 {
-                                    Log.Error("TradierBrokerage.CheckForFills(): Unable to process the orders placed outside of the algorithm: " + string.Join(", ", unprocessableOrderIDs));
+                                    var ids = string.Join(", ", unprocessableOrderIDs);
+                                    Log.Error("TradierBrokerage.CheckForFills(): Unable to process the orders placed outside of the algorithm: " + ids);
+                                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "UnprocessableOrderId",
+                                        $"Tradier order id(s) {ids} were placed outside of the algorithm and are not supported, so they will not be tracked."));
                                 }
                             }
 
