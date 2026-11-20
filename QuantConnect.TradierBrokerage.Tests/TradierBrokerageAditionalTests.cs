@@ -42,6 +42,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
     public class TradierBrokerageAditionalTests
     {
         private const long BrokerageSideOrderId = 1234;
+        private const string FinalizedOrderResponse = "{\"errors\":{\"error\":[\"order already in finalized state: filled\"]}}";
 
         [Test]
         public void InitializesFactoryFromComposer()
@@ -786,6 +787,38 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 InvokeCheckForFills(brokerage);
             }
             Assert.AreEqual(2, verificationFailures);
+        }
+
+        // An order crossing zero is split in a closing and an opening part, the closing one can fill while the opening one
+        // is still open. Tradier refuses to cancel the filled part, which used to stop the cancellation of the open one
+        [TestCase("{\"order\":{\"id\":1002,\"status\":\"ok\"}}", HttpStatusCode.OK, true)]
+        [TestCase(FinalizedOrderResponse, HttpStatusCode.BadRequest, false)]
+        [TestCase("{\"fault\":{\"faultstring\":\"Invalid Access Token\"}}", HttpStatusCode.Unauthorized, false)]
+        public void CancelsTheOpenPartOfAnOrderWhoseOtherPartIsFinalized(string openPartResponse, HttpStatusCode openPartStatus, bool expectedCanceled)
+        {
+            List<string> canceledIds = [];
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns<IRestRequest>(request =>
+            {
+                var id = request.Resource.Split('/').Last();
+                canceledIds.Add(id);
+                var response = id == "1001"
+                    ? CreateResponse(FinalizedOrderResponse, HttpStatusCode.BadRequest)
+                    : CreateResponse(openPartResponse, openPartStatus);
+                response.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                return response;
+            });
+
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider(), restClient.Object);
+            List<OrderEvent> orderEvents = [];
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            var order = new MarketOrder(Symbols.AAPL, -10m, DateTime.UtcNow);
+            order.BrokerId.AddRange(["1001", "1002"]);
+
+            Assert.AreEqual(expectedCanceled, brokerage.CancelOrder(order));
+            CollectionAssert.AreEqual(new[] { "1001", "1002" }, canceledIds);
+            Assert.AreEqual(expectedCanceled ? 1 : 0, orderEvents.Count(x => x.Status == OrderStatus.Canceled));
         }
 
         // the orders container is only meant to be deserialized, its converter doesn't write, so wrap the orders by hand
