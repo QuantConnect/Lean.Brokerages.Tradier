@@ -72,6 +72,9 @@ namespace QuantConnect.Brokerages.Tradier
         private static readonly Regex HtmlResponseRegex = new (@"^\s*<(!doctype\s+html|html[\s>])",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+        // Tradier's error for canceling an order that is already filled or canceled
+        private const string OrderAlreadyFinalizedError = "order already in finalized state:";
+
         private bool _useSandbox;
         private string _accountId;
 
@@ -223,7 +226,7 @@ namespace QuantConnect.Brokerages.Tradier
                     }
 
                     // this happens when we try to cancel a filled or cancelled order
-                    if (raw.Content.Contains("order already in finalized state:"))
+                    if (raw.Content.Contains(OrderAlreadyFinalizedError))
                     {
                         if (request.Method == Method.DELETE)
                         {
@@ -542,6 +545,14 @@ namespace QuantConnect.Brokerages.Tradier
         /// </summary>
         public TradierOrderResponse CancelOrder(long orderId)
         {
+            return CancelOrder(orderId, out _);
+        }
+
+        /// <summary>
+        /// Cancel the order with this account and id number and hand back the raw body of the last response
+        /// </summary>
+        private TradierOrderResponse CancelOrder(long orderId, out string rawContent)
+        {
             //Compose Request:
             var request = new RestRequest($"accounts/{_accountId}/orders/{orderId}")
             {
@@ -549,7 +560,7 @@ namespace QuantConnect.Brokerages.Tradier
             };
 
             //Transmit Request:
-            return Execute<TradierOrderResponse>(request, TradierApiRequestType.Orders);
+            return Execute<TradierOrderResponse>(request, TradierApiRequestType.Orders, out rawContent);
         }
 
         /// <summary>
@@ -1040,15 +1051,21 @@ Interval	Data Available (Open)	Data Available (All)
             // types, such as market on close
             _cancelledQcOrderIDs.Add(order.Id);
 
+            var cancelRequested = false;
             foreach (var orderID in order.BrokerId)
             {
                 var id = Parse.Long(orderID);
-                var response = CancelOrder(id);
+                var response = CancelOrder(id, out var rawContent);
                 if (response == null)
                 {
-                    // this can happen if the order has already been filled
+                    // the filled closing part of an order crossing zero mustn't keep its opening part from being canceled
+                    if (rawContent != null && rawContent.Contains(OrderAlreadyFinalizedError))
+                    {
+                        continue;
+                    }
                     return false;
                 }
+                cancelRequested = true;
                 if (response.Errors.Errors.IsNullOrEmpty() && response.Order.Status == "ok")
                 {
                     TradierCachedOpenOrder tradierOrder;
@@ -1058,7 +1075,7 @@ Interval	Data Available (Open)	Data Available (All)
                 }
             }
 
-            return true;
+            return cancelRequested;
         }
 
         /// <summary>
