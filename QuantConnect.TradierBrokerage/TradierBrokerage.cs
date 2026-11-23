@@ -118,6 +118,8 @@ namespace QuantConnect.Brokerages.Tradier
         private int _pendingOrderPlacements;
         private readonly FixedSizeHashQueue<long> _verifiedUnknownTradierOrderIDs = new FixedSizeHashQueue<long>(1000);
         private readonly FixedSizeHashQueue<int> _cancelledQcOrderIDs = new FixedSizeHashQueue<int>(10000);
+        // lean orders whose cancellation Tradier accepted
+        private readonly FixedSizeHashQueue<int> _cancelAcceptedQcOrderIDs = new FixedSizeHashQueue<int>(10000);
         private string _restApiUrl = "https://api.tradier.com/v1/";
         private string _restApiSandboxUrl = "https://sandbox.tradier.com/v1/";
 
@@ -1071,6 +1073,10 @@ Interval	Data Available (Open)	Data Available (All)
                 cancelRequested = true;
             }
 
+            if (cancelRequested)
+            {
+                _cancelAcceptedQcOrderIDs.Add(order.Id);
+            }
             return cancelRequested;
         }
 
@@ -1610,6 +1616,19 @@ Interval	Data Available (Open)	Data Available (All)
                 var security = _securityProvider.GetSecurity(qcOrder.Symbol);
                 fill.OrderFee = security.FeeModel.GetOrderFee(
                     new OrderFeeParameters(security, qcOrder));
+            }
+
+            // the closing part of an order crossing zero filled after Tradier accepted the order's cancel: report the fill
+            // and the cancel, which drops the opening part instead of placing it
+            if (leanOrderStatus == OrderStatus.Filled && _cancelAcceptedQcOrderIDs.Contains(qcOrder.Id)
+                && TryGetUpdateCrossZeroOrderQuantity(qcOrder, out var placedQuantity) && placedQuantity != qcOrder.Quantity)
+            {
+                fill.Status = OrderStatus.PartiallyFilled;
+                OnOrderEvent(fill);
+                var canceled = new OrderEvent(qcOrder, DateTime.UtcNow, OrderFee.Zero, "Tradier Order Event") { Status = OrderStatus.Canceled };
+                TryHandleRemainingCrossZeroOrder(qcOrder, canceled);
+                OnOrderEvent(canceled);
+                return;
             }
 
             // if we filled the order and have another contingent order waiting, submit it

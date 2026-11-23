@@ -969,6 +969,61 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(openingPart.Id));
         }
 
+        [Test]
+        public void DropsTheOpeningPartOfAnOrderCrossingZeroWhoseClosingPartFilledAfterItsCancelWasAccepted()
+        {
+            var closingPart = CreateBrokerageSideOrder(TradierOrderStatus.Open);
+            closingPart.Id = 1001;
+            closingPart.Quantity = 5m;
+            closingPart.RemainingQuantity = 5m;
+            closingPart.Direction = TradierOrderDirection.Sell;
+
+            var placedOrderIds = new Queue<long>([closingPart.Id, 1002]);
+            var polledOrders = new[] { closingPart };
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{placedOrderIds.Dequeue()},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET)))
+                .Returns(() => CreateResponse(SerializeOrders(polledOrders)));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var response = CreateResponse($"{{\"order\":{{\"id\":{closingPart.Id},\"status\":\"ok\"}}}}");
+                    response.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                    return response;
+                });
+
+            var orderProvider = new OrderProvider();
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
+            var securityProvider = GetPrivateField<ISecurityProvider>(typeof(TradierBrokerage), brokerage, "_securityProvider");
+            securityProvider.GetSecurity(Symbols.SPY).Holdings.SetHoldings(100m, 5m);
+            List<OrderEvent> orderEvents = [];
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            var order = new MarketOrder(Symbols.SPY, -10m, DateTime.UtcNow);
+            orderProvider.Add(order);
+            Assert.IsTrue(brokerage.PlaceOrder(order));
+            InvokeCheckForFills(brokerage);
+
+            // Tradier accepts the cancel, but the closing part fills before Tradier cancels it
+            Assert.IsTrue(brokerage.CancelOrder(order));
+            var filledClosingPart = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 5m);
+            filledClosingPart.Id = closingPart.Id;
+            filledClosingPart.Quantity = 5m;
+            filledClosingPart.RemainingQuantity = 0m;
+            filledClosingPart.Direction = TradierOrderDirection.Sell;
+            polledOrders = [filledClosingPart];
+            InvokeCheckForFills(brokerage);
+
+            // the opening part would be placed in the background: give it the time to show up
+            Thread.Sleep(500);
+            restClient.Verify(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)), Times.Once);
+            CollectionAssert.AreEqual(new[] { OrderStatus.Submitted, OrderStatus.PartiallyFilled, OrderStatus.Canceled },
+                orderEvents.Select(x => x.Status));
+            CollectionAssert.AreEqual(new[] { 0m, -5m, 0m }, orderEvents.Select(x => x.FillQuantity));
+            Assert.IsEmpty(GetCachedOpenOrders(brokerage));
+        }
+
         // the orders container is only meant to be deserialized, its converter doesn't write, so wrap the orders by hand
         private static string SerializeOrders(params TradierOrder[] orders)
         {
