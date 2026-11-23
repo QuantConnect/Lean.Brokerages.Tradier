@@ -133,7 +133,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             // before the next can be submitted, so we just limit this impl to only having on active order
             // by symbol at a time, new orders will issue cancel commands for the existing order
 
-            bool orderFilledOrCanceled = false;
+            using var orderFilledOrCanceled = new ManualResetEventSlim(false);
             var order = parameters.CreateLongOrder(1);
             EventHandler<List<OrderEvent>> brokerageOnOrderStatusChanged = (sender, args) =>
             {
@@ -141,7 +141,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 // we expect all orders to be cancelled except for market orders, they may fill before the next order is submitted
                 if (orderEvent.OrderId == order.Id && orderEvent.Status == OrderStatus.Canceled || (order is MarketOrder && orderEvent.Status == OrderStatus.Filled))
                 {
-                    orderFilledOrCanceled = true;
+                    orderFilledOrCanceled.Set();
                 }
             };
 
@@ -151,9 +151,12 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             PlaceOrderWaitForStatus(order, OrderStatus.Submitted);
             PlaceOrderWaitForStatus(parameters.CreateLongMarketOrder(1));
 
+            // the fill polling reports the cancellation once Tradier has canceled the order, which can be after the new order fills
+            var filledOrCanceled = orderFilledOrCanceled.Wait(TimeSpan.FromSeconds(10));
+
             Brokerage.OrdersStatusChanged -= brokerageOnOrderStatusChanged;
 
-            Assert.IsTrue(orderFilledOrCanceled);
+            Assert.IsTrue(filledOrCanceled);
         }
 
         [Test]
@@ -279,6 +282,13 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         [Test, TestCaseSource(nameof(OrderParameters))]
         public override void CancelOrders(OrderTestParameters parameters)
         {
+            // the setup cancels the orders left open in the account, and the fill polling reports their cancellation later on:
+            // wait for it, else it is taken for a cancellation of the second cancel request
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (OrderProvider.GetOpenOrders().Count > 0 && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(500);
+            }
             base.CancelOrders(parameters);
         }
 
