@@ -907,7 +907,8 @@ Interval	Data Available (Open)	Data Available (All)
             }
 
             // before doing anything, verify only one outstanding order per symbol. An order whose cancellation is pending stays
-            // cached until the fill polling sees it canceled, so look past it at every cached order of the symbol
+            // cached until the fill polling sees it canceled, so look past it at every cached order of the symbol. Tradier
+            // lists an option order under its underlying's ticker, so only the orders of this very security are replaced
             var cachedOpenOrders = _cachedOpenOrdersByTradierOrderID.Where(x => x.Value.Order.Symbol == order.Symbol.Value).ToList();
             var canceledQcOrderIds = new HashSet<int>();
             foreach (var cachedOpenOrder in cachedOpenOrders)
@@ -921,7 +922,7 @@ Interval	Data Available (Open)	Data Available (All)
                 }
                 // if the qc order is still listed as open, then we have an issue, attempt to cancel it before placing this new order,
                 // unless its cancellation is already pending or was accepted by Tradier
-                else if (qcOrder.Status.IsOpen() && qcOrder.Status != OrderStatus.CancelPending
+                else if (qcOrder.Symbol == order.Symbol && qcOrder.Status.IsOpen() && qcOrder.Status != OrderStatus.CancelPending
                     && !_cancelAcceptedQcOrderIDs.Contains(qcOrder.Id) && canceledQcOrderIds.Add(qcOrder.Id))
                 {
                     // let the world know what we're doing

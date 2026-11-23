@@ -1124,6 +1124,56 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             CollectionAssert.AreEqual(expected, canceledIds);
         }
 
+        // Tradier lists an option order under its underlying's ticker: replacing a stock order mustn't cancel the working
+        // orders of the options on it
+        [TestCase(OrderStatus.Submitted)]
+        [TestCase(OrderStatus.CancelPending)]
+        public void PlacingAnOrderLeavesTheWorkingOrdersOfOtherSecuritiesOnTheSameTicker(OrderStatus stockOrderStatus)
+        {
+            List<string> canceledIds = [];
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var id = request.Resource.Split('/').Last();
+                    canceledIds.Add(id);
+                    return CreateResponse($"{{\"order\":{{\"id\":{id},\"status\":\"ok\"}}}}");
+                });
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse("{\"order\":{\"id\":1237,\"status\":\"ok\"}}"));
+
+            var (brokerage, stockOrder, _) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            stockOrder.Status = stockOrderStatus;
+            var orderProvider = GetPrivateField<IOrderProvider>(typeof(TradierBrokerage), brokerage, "_orderProvider") as OrderProvider;
+
+            var expiry = new DateTime(2025, 06, 20);
+            var contracts = new[]
+            {
+                (Id: 1235L, Right: OptionRight.Call, Ticker: "SPY250620C00500000"),
+                (Id: 1236L, Right: OptionRight.Put, Ticker: "SPY250620P00500000")
+            };
+            foreach (var contract in contracts)
+            {
+                var option = Symbol.CreateOption(Symbols.SPY, Market.USA, OptionStyle.American, contract.Right, 500m, expiry);
+                var optionOrder = new LimitOrder(option, 1m, 1m, DateTime.UtcNow) { Status = OrderStatus.Submitted };
+                optionOrder.BrokerId.Add(contract.Id.ToStringInvariant());
+                orderProvider.Add(optionOrder);
+
+                var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open, type: TradierOrderType.Limit,
+                    orderClass: TradierOrderClass.Option);
+                brokerageSideOrder.Id = contract.Id;
+                brokerageSideOrder.OptionSymbol = contract.Ticker;
+                InvokePrivate(brokerage, "UpdateCachedOpenOrder", contract.Id, brokerageSideOrder);
+            }
+
+            var newStockOrder = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            orderProvider.Add(newStockOrder);
+            Assert.IsTrue(brokerage.PlaceOrder(newStockOrder));
+
+            var expected = stockOrderStatus == OrderStatus.CancelPending ? Array.Empty<string>() : new[] { $"{BrokerageSideOrderId}" };
+            CollectionAssert.AreEqual(expected, canceledIds);
+        }
+
         // the orders container is only meant to be deserialized, its converter doesn't write, so wrap the orders by hand
         private static string SerializeOrders(params TradierOrder[] orders)
         {
