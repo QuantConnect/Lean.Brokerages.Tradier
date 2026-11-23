@@ -1024,6 +1024,106 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.IsEmpty(GetCachedOpenOrders(brokerage));
         }
 
+        // An order missing from the orders list is fetched on its own, in the background. Should the regular polling report
+        // the same execution while that fetch is in flight, the execution is reported once
+        [Test]
+        public void ReportsAnExecutionOnceWhenTheOrderFetchAndThePollingOverlap()
+        {
+            var detailRequested = new ManualResetEventSlim();
+            var releaseDetail = new ManualResetEventSlim();
+            var partiallyFilled = CreateBrokerageSideOrder(TradierOrderStatus.PartiallyFilled, quantityExecuted: 4m);
+            var polledOrders = "{\"orders\":\"null\"}";
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse(polledOrders));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith($"/orders/{BrokerageSideOrderId}"))))
+                .Returns(() =>
+                {
+                    detailRequested.Set();
+                    releaseDetail.Wait(TimeSpan.FromSeconds(10));
+                    return CreateResponse($"{{\"order\":{JsonConvert.SerializeObject(partiallyFilled)}}}");
+                });
+
+            var (brokerage, _, _) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            List<OrderEvent> orderEvents = [];
+            var secondEvent = new ManualResetEventSlim();
+            brokerage.OrdersStatusChanged += (_, events) =>
+            {
+                lock (orderEvents)
+                {
+                    orderEvents.AddRange(events);
+                    if (orderEvents.Count > 1)
+                    {
+                        secondEvent.Set();
+                    }
+                }
+                // the polling is delivering its event: let the fetch return the same execution meanwhile
+                if (!releaseDetail.IsSet)
+                {
+                    releaseDetail.Set();
+                    secondEvent.Wait(TimeSpan.FromSeconds(1));
+                }
+            };
+
+            // the order is missing from the list, which starts its fetch
+            InvokeCheckForFills(brokerage);
+            Assert.IsTrue(detailRequested.Wait(TimeSpan.FromSeconds(10)), "The order was never fetched");
+
+            // the next poll reports the execution
+            polledOrders = SerializeOrders(partiallyFilled);
+            InvokeCheckForFills(brokerage);
+
+            // give the fetch the time to finish
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (GetPrivateField<HashSet<long>>(typeof(TradierBrokerage), brokerage, "_reentranceGuardByTradierOrderID").Contains(BrokerageSideOrderId))
+            {
+                Assert.Less(DateTime.UtcNow, deadline, "The fetch never finished");
+                Thread.Sleep(50);
+            }
+
+            lock (orderEvents)
+            {
+                CollectionAssert.AreEqual(new[] { OrderStatus.PartiallyFilled }, orderEvents.Select(x => x.Status));
+                Assert.AreEqual(4m, orderEvents.Sum(x => x.FillQuantity));
+            }
+        }
+
+        // Placing an order cancels the symbol's outstanding one. The order of an accepted or pending cancellation stays cached
+        // until the fill polling sees it canceled, it mustn't hide a later order that is still working
+        [TestCase(OrderStatus.Submitted)]
+        [TestCase(OrderStatus.CancelPending)]
+        public void CancelsTheWorkingOrderOfTheSymbolBehindOneBeingCanceled(OrderStatus firstOrderStatus)
+        {
+            List<string> canceledIds = [];
+            var placedOrderIds = new Queue<long>([1235, 1236]);
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var id = request.Resource.Split('/').Last();
+                    canceledIds.Add(id);
+                    return CreateResponse($"{{\"order\":{{\"id\":{id},\"status\":\"ok\"}}}}");
+                });
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{placedOrderIds.Dequeue()},\"status\":\"ok\"}}}}"));
+
+            var (brokerage, firstOrder, _) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            firstOrder.Status = firstOrderStatus;
+            var orderProvider = GetPrivateField<IOrderProvider>(typeof(TradierBrokerage), brokerage, "_orderProvider") as OrderProvider;
+
+            var secondOrder = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            orderProvider.Add(secondOrder);
+            Assert.IsTrue(brokerage.PlaceOrder(secondOrder));
+            secondOrder.Status = OrderStatus.Submitted;
+
+            var thirdOrder = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            orderProvider.Add(thirdOrder);
+            Assert.IsTrue(brokerage.PlaceOrder(thirdOrder));
+
+            var expected = firstOrderStatus == OrderStatus.CancelPending ? new[] { "1235" } : new[] { $"{BrokerageSideOrderId}", "1235" };
+            CollectionAssert.AreEqual(expected, canceledIds);
+        }
+
         // the orders container is only meant to be deserialized, its converter doesn't write, so wrap the orders by hand
         private static string SerializeOrders(params TradierOrder[] orders)
         {

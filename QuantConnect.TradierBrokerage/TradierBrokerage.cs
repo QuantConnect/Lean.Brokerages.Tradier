@@ -906,21 +906,23 @@ Interval	Data Available (Open)	Data Available (All)
                 return false;
             }
 
-            // before doing anything, verify only one outstanding order per symbol
-            var cachedOpenOrder = _cachedOpenOrdersByTradierOrderID.FirstOrDefault(x => x.Value.Order.Symbol == order.Symbol.Value).Value;
-            if (cachedOpenOrder != null)
+            // before doing anything, verify only one outstanding order per symbol. An order whose cancellation is pending stays
+            // cached until the fill polling sees it canceled, so look past it at every cached order of the symbol
+            var cachedOpenOrders = _cachedOpenOrdersByTradierOrderID.Where(x => x.Value.Order.Symbol == order.Symbol.Value).ToList();
+            var canceledQcOrderIds = new HashSet<int>();
+            foreach (var cachedOpenOrder in cachedOpenOrders)
             {
-                var qcOrder = _orderProvider.GetOrdersByBrokerageId(cachedOpenOrder.Order.Id)?.SingleOrDefault();
+                var qcOrder = _orderProvider.GetOrdersByBrokerageId(cachedOpenOrder.Key)?.SingleOrDefault();
                 if (qcOrder == null)
                 {
                     // clean up our mess, this should never be encountered.
-                    TradierCachedOpenOrder tradierOrder;
                     Log.Error("TradierBrokerage.PlaceOrder(): Unable to locate existing QC Order when verifying single outstanding order per symbol.");
-                    _cachedOpenOrdersByTradierOrderID.TryRemove(cachedOpenOrder.Order.Id, out tradierOrder);
+                    _cachedOpenOrdersByTradierOrderID.TryRemove(cachedOpenOrder.Key, out _);
                 }
-                // if the qc order is still listed as open, then we have an issue, attempt to cancel it before placing this new order.
-                // An order whose cancellation is pending stays cached until the fill polling sees it canceled
-                else if (qcOrder.Status.IsOpen() && qcOrder.Status != OrderStatus.CancelPending)
+                // if the qc order is still listed as open, then we have an issue, attempt to cancel it before placing this new order,
+                // unless its cancellation is already pending or was accepted by Tradier
+                else if (qcOrder.Status.IsOpen() && qcOrder.Status != OrderStatus.CancelPending
+                    && !_cancelAcceptedQcOrderIDs.Contains(qcOrder.Id) && canceledQcOrderIds.Add(qcOrder.Id))
                 {
                     // let the world know what we're doing
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "OneOrderPerSymbol",
@@ -1308,9 +1310,21 @@ Interval	Data Available (Open)	Data Available (All)
                                 throw new InvalidOperationException("TradierBrokerage.CheckForFills(): GetOrder() return null response");
                             }
 
-                            // diff before caching: the cached entry is the instance we compare against
-                            ProcessPotentiallyUpdatedOrder(cachedOrderLocal.Value, updatedOrderLocal);
-                            if (!OrderIsClosed(updatedOrderLocal)) UpdateCachedOpenOrder(cachedOrderLocal.Key, updatedOrderLocal);
+                            // the fill polling may have processed the order while we fetched it: diff against what's cached now,
+                            // under its lock, so the same execution isn't reported by both
+                            lock (_fillLock)
+                            {
+                                if (!_cachedOpenOrdersByTradierOrderID.TryGetValue(cachedOrderLocal.Key, out var currentCachedOrder)
+                                    // a response older than what the polling cached has nothing new
+                                    || updatedOrderLocal.QuantityExecuted < currentCachedOrder.Order.QuantityExecuted)
+                                {
+                                    return;
+                                }
+
+                                // diff before caching: the cached entry is the instance we compare against
+                                ProcessPotentiallyUpdatedOrder(currentCachedOrder, updatedOrderLocal);
+                                if (!OrderIsClosed(updatedOrderLocal)) UpdateCachedOpenOrder(cachedOrderLocal.Key, updatedOrderLocal);
+                            }
                         }
                         catch (Exception err)
                         {
