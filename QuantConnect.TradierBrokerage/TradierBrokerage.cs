@@ -179,7 +179,7 @@ namespace QuantConnect.Brokerages.Tradier
         /// <summary>
         /// Execute a authenticated call and hand back the raw body of the last response:
         /// </summary>
-        /// <param name="failureMessageType">The type of the message reporting a response that still fails after the retries</param>
+        /// <param name="failureMessageType">The type of the message reporting that Tradier is still unavailable (a 5xx or no response) after the retries, other failures report an error</param>
         private T Execute<T>(RestRequest request, TradierApiRequestType type, out string rawContent, string rootName = "", int max = 10,
             BrokerageMessageType failureMessageType = BrokerageMessageType.Error) where T : new()
         {
@@ -277,7 +277,11 @@ namespace QuantConnect.Brokerages.Tradier
                         ? "Tradier's API is likely temporarily unavailable, please contact support if it persists."
                         : $"Response: {raw.Content}";
 
-                    OnMessage(new BrokerageMessageEvent(failureMessageType, raw.StatusCode.ToStringInvariant(),
+                    // only an unavailable API (a 5xx or no response) is worth waiting for, other statuses won't get better
+                    var tradierUnavailable = raw.StatusCode == 0 || (int)raw.StatusCode >= 500;
+                    var messageType = tradierUnavailable ? failureMessageType : BrokerageMessageType.Error;
+
+                    OnMessage(new BrokerageMessageEvent(messageType, raw.StatusCode.ToStringInvariant(),
                         $"Tradier returned {raw.StatusCode} for {request.Method} {request.Resource} and the request " +
                         $"still failed after {max} retries. {detail}"));
 
@@ -442,7 +446,7 @@ namespace QuantConnect.Brokerages.Tradier
         /// Get Intraday and pending orders for users account: accounts/{account_id}/orders
         /// </summary>
         /// <param name="orders">The orders, empty if there are none or the request failed</param>
-        /// <param name="failureMessageType">The type of the message reporting a request that still fails after its retries.
+        /// <param name="failureMessageType">The type of the message reporting that Tradier is still unavailable after the retries.
         /// A disconnection lets Lean wait out a Tradier outage before stopping the algorithm, the next request retries anyway</param>
         /// <returns>False if the request failed, the failure was already reported</returns>
         private bool TryGetIntradayAndPendingOrders(out List<TradierOrder> orders, BrokerageMessageType failureMessageType = BrokerageMessageType.Disconnect)

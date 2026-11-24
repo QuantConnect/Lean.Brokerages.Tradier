@@ -406,6 +406,25 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.AreEqual(10m, fill.FillQuantity);
         }
 
+        // Waiting only helps while Tradier is unavailable: a client error, e.g. an account the token can't access, still stops the algorithm
+        [Test]
+        public void ReportsAClientErrorOfTheFillPollAsAnError()
+        {
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>()))
+                .Returns(() => CreateResponse("Unauthorized Account: VA000000", HttpStatusCode.BadRequest));
+
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider(), restClient.Object);
+            List<BrokerageMessageEvent> messages = [];
+            brokerage.Message += (_, e) => messages.Add(e);
+
+            InvokeCheckForFills(brokerage);
+
+            var error = messages.Single();
+            Assert.AreEqual(BrokerageMessageType.Error, error.Type);
+            Assert.AreEqual("BadRequest", error.Code);
+        }
+
         // Initialization can't start without the open orders, so it still fails when Tradier can't return them
         [Test]
         public void FailsToGetTheOpenOrdersDuringAnOutage()
