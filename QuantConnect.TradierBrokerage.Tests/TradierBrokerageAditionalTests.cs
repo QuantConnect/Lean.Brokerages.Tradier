@@ -43,6 +43,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
     {
         private const long BrokerageSideOrderId = 1234;
         private const string FinalizedOrderResponse = "{\"errors\":{\"error\":[\"order already in finalized state: filled\"]}}";
+        private const string ServiceUnavailablePage = "<html><head><title>503 Service Temporarily Unavailable</title></head><body></body></html>";
 
         [Test]
         public void InitializesFactoryFromComposer()
@@ -361,6 +362,67 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 Assert.IsTrue(message.Contains($"Response: {body}"), message);
             }
             restClient.Verify(x => x.Execute(It.IsAny<IRestRequest>()), Times.Exactly(2));
+        }
+
+        // A Tradier outage of a few minutes used to stop the algorithm once the fill poll ran out of retries. The poll reports
+        // it as a disconnection instead, which Lean waits out, and reports the fills again once Tradier is back
+        [Test]
+        public void ReportsAnOutageOfTheFillPollAsADisconnection()
+        {
+            var tradierAvailable = false;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => tradierAvailable
+                ? CreateResponse(SerializeOrders(CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)))
+                : CreateResponse(ServiceUnavailablePage, HttpStatusCode.ServiceUnavailable));
+
+            var orderProvider = new OrderProvider();
+            var order = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            order.BrokerId.Add(BrokerageSideOrderId.ToStringInvariant());
+            orderProvider.Add(order);
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
+            InvokePrivate(brokerage, "UpdateCachedOpenOrder", BrokerageSideOrderId, CreateBrokerageSideOrder(TradierOrderStatus.Open));
+
+            List<BrokerageMessageEvent> messages = [];
+            brokerage.Message += (_, e) => messages.Add(e);
+            List<OrderEvent> orderEvents = [];
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            InvokeCheckForFills(brokerage);
+
+            var disconnect = messages.Single();
+            Assert.AreEqual(BrokerageMessageType.Disconnect, disconnect.Type);
+            Assert.AreEqual("ServiceUnavailable", disconnect.Code);
+            Assert.IsTrue(disconnect.Message.Contains("Tradier's API is likely temporarily unavailable"), disconnect.Message);
+            Assert.IsEmpty(orderEvents);
+
+            tradierAvailable = true;
+            InvokeCheckForFills(brokerage);
+            InvokeCheckForFills(brokerage);
+
+            Assert.AreEqual(2, messages.Count);
+            Assert.AreEqual(BrokerageMessageType.Reconnect, messages[1].Type);
+            var fill = orderEvents.Single();
+            Assert.AreEqual(OrderStatus.Filled, fill.Status);
+            Assert.AreEqual(10m, fill.FillQuantity);
+        }
+
+        // Initialization can't start without the open orders, so it still fails when Tradier can't return them
+        [Test]
+        public void FailsToGetTheOpenOrdersDuringAnOutage()
+        {
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>()))
+                .Returns(() => CreateResponse(ServiceUnavailablePage, HttpStatusCode.ServiceUnavailable));
+
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider(), restClient.Object);
+            List<BrokerageMessageEvent> messages = [];
+            brokerage.Message += (_, e) => messages.Add(e);
+
+            Assert.IsEmpty(brokerage.GetOpenOrders());
+
+            var error = messages.Single();
+            Assert.AreEqual(BrokerageMessageType.Error, error.Type);
+            Assert.AreEqual("ServiceUnavailable", error.Code);
         }
 
         // Orders placed in the Tradier account outside of the algorithm are offered to it through the
@@ -949,7 +1011,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 .MakeGenericMethod(typeof(T));
             try
             {
-                return (T)method.Invoke(brokerage, new object[] { new RestRequest(resource, httpMethod), type, "", max });
+                return (T)method.Invoke(brokerage, new object[] { new RestRequest(resource, httpMethod), type, "", max, BrokerageMessageType.Error });
             }
             catch (TargetInvocationException e)
             {

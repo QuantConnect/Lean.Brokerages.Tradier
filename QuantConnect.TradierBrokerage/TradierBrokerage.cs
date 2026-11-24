@@ -114,6 +114,8 @@ namespace QuantConnect.Brokerages.Tradier
         private readonly HashSet<long> _contingentReentranceGuardByQCOrderID = new HashSet<long>();
 
         private readonly UnknownOrderIds _unknownTradierOrderIDs = new();
+        // the last orders request failed, its next success reports the brokerage as reconnected
+        private volatile bool _ordersRequestFailed;
         // placements whose Tradier id isn't cached yet, the unknown order verification waits for them
         private int _pendingOrderPlacements;
         private readonly FixedSizeHashQueue<long> _verifiedUnknownTradierOrderIDs = new FixedSizeHashQueue<long>(1000);
@@ -168,15 +170,18 @@ namespace QuantConnect.Brokerages.Tradier
         /// <summary>
         /// Execute a authenticated call:
         /// </summary>
-        private T Execute<T>(RestRequest request, TradierApiRequestType type, string rootName = "", int max = 10) where T : new()
+        private T Execute<T>(RestRequest request, TradierApiRequestType type, string rootName = "", int max = 10,
+            BrokerageMessageType failureMessageType = BrokerageMessageType.Error) where T : new()
         {
-            return Execute<T>(request, type, out _, rootName, max);
+            return Execute<T>(request, type, out _, rootName, max, failureMessageType);
         }
 
         /// <summary>
         /// Execute a authenticated call and hand back the raw body of the last response:
         /// </summary>
-        private T Execute<T>(RestRequest request, TradierApiRequestType type, out string rawContent, string rootName = "", int max = 10) where T : new()
+        /// <param name="failureMessageType">The type of the message reporting a response that still fails after the retries</param>
+        private T Execute<T>(RestRequest request, TradierApiRequestType type, out string rawContent, string rootName = "", int max = 10,
+            BrokerageMessageType failureMessageType = BrokerageMessageType.Error) where T : new()
         {
             var method = "TradierBrokerage.Execute." + request.Resource;
             var parameters = request.Parameters.Select(x => x.Name + ": " + x.Value);
@@ -272,7 +277,7 @@ namespace QuantConnect.Brokerages.Tradier
                         ? "Tradier's API is likely temporarily unavailable, please contact support if it persists."
                         : $"Response: {raw.Content}";
 
-                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, raw.StatusCode.ToStringInvariant(),
+                    OnMessage(new BrokerageMessageEvent(failureMessageType, raw.StatusCode.ToStringInvariant(),
                         $"Tradier returned {raw.StatusCode} for {request.Method} {request.Resource} and the request " +
                         $"still failed after {max} retries. {detail}"));
 
@@ -437,16 +442,25 @@ namespace QuantConnect.Brokerages.Tradier
         /// Get Intraday and pending orders for users account: accounts/{account_id}/orders
         /// </summary>
         /// <param name="orders">The orders, empty if there are none or the request failed</param>
+        /// <param name="failureMessageType">The type of the message reporting a request that still fails after its retries.
+        /// A disconnection lets Lean wait out a Tradier outage before stopping the algorithm, the next request retries anyway</param>
         /// <returns>False if the request failed, the failure was already reported</returns>
-        private bool TryGetIntradayAndPendingOrders(out List<TradierOrder> orders)
+        private bool TryGetIntradayAndPendingOrders(out List<TradierOrder> orders, BrokerageMessageType failureMessageType = BrokerageMessageType.Disconnect)
         {
             var request = new RestRequest($"accounts/{_accountId}/orders");
-            var ordersContainer = Execute<TradierOrdersContainer>(request, TradierApiRequestType.Standard);
+            var ordersContainer = Execute<TradierOrdersContainer>(request, TradierApiRequestType.Standard, failureMessageType: failureMessageType);
 
             orders = [];
             if (ordersContainer == null)
             {
+                _ordersRequestFailed = true;
                 return false;
+            }
+
+            if (_ordersRequestFailed)
+            {
+                _ordersRequestFailed = false;
+                OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
             }
 
             if (ordersContainer.Orders == null)
@@ -819,7 +833,8 @@ Interval	Data Available (Open)	Data Available (All)
         public override List<Order> GetOpenOrders()
         {
             var orders = new List<Order>();
-            if (!TryGetIntradayAndPendingOrders(out var openOrders))
+            // the algorithm can't start without its open orders, so a failure stops it
+            if (!TryGetIntradayAndPendingOrders(out var openOrders, BrokerageMessageType.Error))
             {
                 return orders;
             }
