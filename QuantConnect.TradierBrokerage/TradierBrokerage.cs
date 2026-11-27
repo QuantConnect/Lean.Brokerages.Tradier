@@ -969,6 +969,10 @@ Interval	Data Available (Open)	Data Available (All)
             {
                 return new CrossZeroOrderResponse(string.Empty, false);
             }
+            if (isPlaceOrderWithLeanEvent && _cachedOpenOrdersByTradierOrderID.TryGetValue(response.Order.Id, out var closingPart))
+            {
+                closingPart.PlacesOpeningPartOnFill = true;
+            }
             return new CrossZeroOrderResponse(response.Order.Id.ToStringInvariant(), true);
         }
 
@@ -1050,24 +1054,28 @@ Interval	Data Available (Open)	Data Available (All)
             _cancelledQcOrderIDs.Add(order.Id);
 
             var cancelRequested = false;
-            foreach (var orderID in order.BrokerId)
+            // the fill polling waits for Tradier's answer: whether a closing part filling now places the opening part depends on it
+            lock (_fillLock)
             {
-                var id = Parse.Long(orderID);
-                var response = CancelOrder(id, out var rawContent);
-                if (response == null)
+                foreach (var orderID in order.BrokerId)
                 {
-                    // the filled closing part of an order crossing zero mustn't keep its opening part from being canceled
-                    if (rawContent != null && rawContent.Contains(OrderAlreadyFinalizedError))
+                    var id = Parse.Long(orderID);
+                    var response = CancelOrder(id, out var rawContent);
+                    if (response == null)
                     {
-                        continue;
+                        // the filled closing part of an order crossing zero mustn't keep its opening part from being canceled
+                        if (rawContent != null && rawContent.Contains(OrderAlreadyFinalizedError))
+                        {
+                            continue;
+                        }
+                        return false;
                     }
-                    return false;
-                }
-                cancelRequested = true;
-                if (response.Errors.Errors.IsNullOrEmpty() && response.Order.Status == "ok"
-                    && _cachedOpenOrdersByTradierOrderID.TryGetValue(id, out var tradierOrder))
-                {
-                    tradierOrder.CancelPending = true;
+                    cancelRequested = true;
+                    if (response.Errors.Errors.IsNullOrEmpty() && response.Order.Status == "ok"
+                        && _cachedOpenOrdersByTradierOrderID.TryGetValue(id, out var tradierOrder))
+                    {
+                        tradierOrder.CancelPending = true;
+                    }
                 }
             }
 
@@ -1274,6 +1282,9 @@ Interval	Data Available (Open)	Data Available (All)
                     var hasUpdatedOrder = updatedOrders.TryGetValue(cachedOrder.Key, out updatedOrder);
                     if (hasUpdatedOrder)
                     {
+                        // a stale snapshot, the orders list can lag behind the order's own fetch
+                        if (updatedOrder.QuantityExecuted < cachedOrder.Value.Order.QuantityExecuted) continue;
+
                         // determine if the order has been updated and produce fills accordingly
                         ProcessPotentiallyUpdatedOrder(cachedOrder.Value, updatedOrder);
 
@@ -1291,6 +1302,7 @@ Interval	Data Available (Open)	Data Available (All)
                     }
 
                     var cachedOrderLocal = cachedOrder;
+                    var snapshotBeforeFetch = cachedOrder.Value.Order;
                     Task.Run(() =>
                     {
                         try
@@ -1309,7 +1321,9 @@ Interval	Data Available (Open)	Data Available (All)
                             lock (_fillLock)
                             {
                                 if (!_cachedOpenOrdersByTradierOrderID.TryGetValue(cachedOrderLocal.Key, out var currentCachedOrder)
-                                    || updatedOrderLocal.QuantityExecuted < currentCachedOrder.Order.QuantityExecuted)
+                                    || updatedOrderLocal.QuantityExecuted < currentCachedOrder.Order.QuantityExecuted
+                                    // the poll cached a newer snapshot during the fetch, which only adds executed quantity to it
+                                    || updatedOrderLocal.QuantityExecuted == currentCachedOrder.Order.QuantityExecuted && currentCachedOrder.Order != snapshotBeforeFetch)
                                 {
                                     return;
                                 }
@@ -1326,8 +1340,11 @@ Interval	Data Available (Open)	Data Available (All)
                         }
                         finally
                         {
-                            // signal that we've left the task
-                            _reentranceGuardByTradierOrderID.Remove(cachedOrderLocal.Key);
+                            // signal that we've left the task, the poll adds to the guard under the same lock
+                            lock (_fillLock)
+                            {
+                                _reentranceGuardByTradierOrderID.Remove(cachedOrderLocal.Key);
+                            }
                         }
                     });
                 }
@@ -1622,8 +1639,7 @@ Interval	Data Available (Open)	Data Available (All)
                         new OrderFeeParameters(security, qcOrder));
                 }
 
-                if (leanOrderStatus == OrderStatus.Filled && cachedOrder.CancelPending
-                    && TryGetUpdateCrossZeroOrderQuantity(qcOrder, out var placedQuantity) && placedQuantity != qcOrder.Quantity)
+                if (leanOrderStatus == OrderStatus.Filled && cachedOrder.CancelPending && cachedOrder.PlacesOpeningPartOnFill)
                 {
                     fill.Status = OrderStatus.PartiallyFilled;
                     OnOrderEvent(fill);
@@ -2221,6 +2237,10 @@ Interval	Data Available (Open)	Data Available (All)
         {
             public bool EmittedOrderFee;
             public bool CancelPending;
+            /// <summary>
+            /// Whether this is the closing part of an order crossing zero, whose fill places the opening part
+            /// </summary>
+            public bool PlacesOpeningPartOnFill;
             public TradierOrder Order;
 
             public TradierCachedOpenOrder(TradierOrder order)
