@@ -884,6 +884,72 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             CollectionAssert.AreEqual(new[] { OrderStatus.Canceled }, orderEvents.Select(x => x.Status));
         }
 
+        // An empty response for an order fetched on its own holds no order: it mustn't take the place of the cached one, nor
+        // report anything, even for the order of an accepted cancel
+        [Test]
+        public void IgnoresAnEmptyResponseForAnOrderMissingFromTheOrdersList()
+        {
+            var fetched = new ManualResetEventSlim(false);
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse("{\"orders\":\"null\"}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith($"/orders/{BrokerageSideOrderId}") && r.Method == Method.GET)))
+                .Returns(() =>
+                {
+                    fetched.Set();
+                    return CreateResponse("{\"order\":null}");
+                });
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            List<BrokerageMessageEvent> messages = [];
+            brokerage.Message += (_, message) => messages.Add(message);
+            Assert.IsTrue(brokerage.CancelOrder(order));
+
+            InvokeCheckForFills(brokerage);
+
+            Assert.IsTrue(fetched.Wait(TimeSpan.FromSeconds(10)), "The order was never fetched");
+            // the fetch is done once it left the reentrance guard
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (GetPrivateField<ICollection<long>>(typeof(TradierBrokerage), brokerage, "_reentranceGuardByTradierOrderID").Count > 0)
+            {
+                Assert.Less(DateTime.UtcNow, deadline, "The fetch never ended");
+                Thread.Sleep(50);
+            }
+            CollectionAssert.IsEmpty(orderEvents);
+            CollectionAssert.IsEmpty(messages.Where(x => x.Type != BrokerageMessageType.Information));
+            Assert.IsTrue(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // Tradier accepted the cancel of the order, so it isn't active any more: updating it sends nothing
+        [TestCase(true)]
+        [TestCase(false)]
+        public void DoesNotUpdateAnOrderWhoseCancelWasAccepted(bool cancelAccepted)
+        {
+            var updateRequests = 0;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.PUT)))
+                .Returns(() =>
+                {
+                    updateRequests++;
+                    return CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}");
+                });
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            if (cancelAccepted)
+            {
+                Assert.IsTrue(brokerage.CancelOrder(order));
+            }
+
+            Assert.AreEqual(!cancelAccepted, brokerage.UpdateOrder(order));
+            Assert.AreEqual(cancelAccepted ? 0 : 1, updateRequests);
+            CollectionAssert.AreEqual(cancelAccepted ? Array.Empty<OrderStatus>() : new[] { OrderStatus.UpdateSubmitted },
+                orderEvents.Select(x => x.Status));
+        }
+
         // The order of an accepted cancel stays cached until the fill polling sees it canceled, a new order for the same
         // symbol mustn't cancel it again
         [TestCase(true)]

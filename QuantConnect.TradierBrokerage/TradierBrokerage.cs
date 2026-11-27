@@ -994,13 +994,10 @@ Interval	Data Available (Open)	Data Available (All)
                 return false;
             }
 
-            // there's only one active tradier order per qc order, find it
-            var activeOrder = (
-                from brokerId in order.BrokerId
-                let id = Parse.Long(brokerId)
-                where _cachedOpenOrdersByTradierOrderID.ContainsKey(id)
-                select _cachedOpenOrdersByTradierOrderID[id]
-                ).SingleOrDefault();
+            // there's only one active tradier order per qc order, find it. One whose cancel Tradier accepted isn't active
+            var activeOrder = order.BrokerId
+                .Select(brokerId => _cachedOpenOrdersByTradierOrderID.TryGetValue(Parse.Long(brokerId), out var cached) ? cached : null)
+                .SingleOrDefault(cached => cached != null && !cached.CancelPending);
 
             if (activeOrder == null)
             {
@@ -1305,6 +1302,11 @@ Interval	Data Available (Open)	Data Available (All)
                             {
                                 Log.Error($"TradierBrokerage.CheckForFills(): Unable to locate order {cachedOrderLocal.Key} in cached open orders.");
                                 throw new InvalidOperationException("TradierBrokerage.CheckForFills(): GetOrder() return null response");
+                            }
+                            // an empty response, which GetOrder already logged, holds no order to report
+                            if (updatedOrderLocal.Id != cachedOrderLocal.Key)
+                            {
+                                return;
                             }
 
                             UpdateCachedOpenOrder(cachedOrderLocal.Key, updatedOrderLocal);
