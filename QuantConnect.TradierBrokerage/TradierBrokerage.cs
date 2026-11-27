@@ -275,7 +275,6 @@ namespace QuantConnect.Brokerages.Tradier
                         ? "Tradier's API is likely temporarily unavailable, please contact support if it persists."
                         : $"Response: {raw.Content}";
 
-                    // only an unavailable API (a 5xx or no response) is worth waiting for, other statuses won't get better
                     var tradierUnavailable = raw.StatusCode == 0 || (int)raw.StatusCode >= 500;
                     var messageType = tradierUnavailable ? failureMessageType : BrokerageMessageType.Error;
 
@@ -458,7 +457,6 @@ namespace QuantConnect.Brokerages.Tradier
                 return false;
             }
 
-            // Lean only passes this on after a disconnection
             OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
 
             if (ordersContainer.Orders == null)
@@ -831,7 +829,6 @@ Interval	Data Available (Open)	Data Available (All)
         public override List<Order> GetOpenOrders()
         {
             var orders = new List<Order>();
-            // the algorithm can't start without its open orders, so a failure stops it
             if (!TryGetIntradayAndPendingOrders(out var openOrders, BrokerageMessageType.Error))
             {
                 return orders;
