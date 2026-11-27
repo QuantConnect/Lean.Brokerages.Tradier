@@ -102,8 +102,6 @@ namespace QuantConnect.Brokerages.Tradier
         private readonly CancellationTokenSource _cancellationTokenSource = new();
 
         private readonly object _fillLock = new object();
-
-        // the connection messages, sent in order and off the thread that reports them
         private readonly object _connectionMessagesLock = new();
         private Task _connectionMessages = Task.CompletedTask;
         private BrokerageMessageType _lastConnectionMessageType = BrokerageMessageType.Reconnect;
@@ -1117,12 +1115,12 @@ Interval	Data Available (Open)	Data Available (All)
         /// Event invocator for the Message event
         /// </summary>
         /// <param name="e">The error</param>
+        /// <remarks>Disconnect and Reconnect reach the subscribers in order, on a background task and only when the state changes:
+        /// the fill poll reports them, and a subscriber such as an algorithm placing an order on reconnection waits for the next poll</remarks>
         protected override void OnMessage(BrokerageMessageEvent e)
         {
             if (e.Type is BrokerageMessageType.Disconnect or BrokerageMessageType.Reconnect)
             {
-                // the fill poll would wait for the subscribers, e.g. an algorithm placing an order on reconnection,
-                // whose fill only the next poll can report
                 lock (_connectionMessagesLock)
                 {
                     if (e.Type != _lastConnectionMessageType)
@@ -1472,7 +1470,6 @@ Interval	Data Available (Open)	Data Available (All)
                     });
                 }
 
-                // after the fills, which the algorithm's reconnection handler has to see
                 OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
             }
             catch (Exception err)
