@@ -1054,10 +1054,21 @@ Interval	Data Available (Open)	Data Available (All)
             _cancelledQcOrderIDs.Add(order.Id);
 
             var cancelRequested = false;
-            // the fill polling waits for Tradier's answer: whether a closing part filling now places the opening part depends on it
+            List<string> brokerIds;
+            List<TradierCachedOpenOrder> cancelsInFlight;
             lock (_fillLock)
             {
-                foreach (var orderID in order.BrokerId)
+                brokerIds = order.BrokerId.ToList();
+                cancelsInFlight = brokerIds
+                    .Select(id => _cachedOpenOrdersByTradierOrderID.TryGetValue(Parse.Long(id), out var cached) ? cached : null)
+                    .Where(cached => cached != null)
+                    .ToList();
+                cancelsInFlight.ForEach(cached => cached.CancelInFlight = true);
+            }
+
+            try
+            {
+                foreach (var orderID in brokerIds)
                 {
                     var id = Parse.Long(orderID);
                     var response = CancelOrder(id, out var rawContent);
@@ -1076,6 +1087,13 @@ Interval	Data Available (Open)	Data Available (All)
                     {
                         tradierOrder.CancelPending = true;
                     }
+                }
+            }
+            finally
+            {
+                lock (_fillLock)
+                {
+                    cancelsInFlight.ForEach(cached => cached.CancelInFlight = false);
                 }
             }
 
@@ -1282,8 +1300,11 @@ Interval	Data Available (Open)	Data Available (All)
                     var hasUpdatedOrder = updatedOrders.TryGetValue(cachedOrder.Key, out updatedOrder);
                     if (hasUpdatedOrder)
                     {
-                        // a stale snapshot, the orders list can lag behind the order's own fetch
-                        if (updatedOrder.QuantityExecuted < cachedOrder.Value.Order.QuantityExecuted) continue;
+                        if (updatedOrder.QuantityExecuted < cachedOrder.Value.Order.QuantityExecuted
+                            || cachedOrder.Value.AwaitsCancelAnswer(updatedOrder))
+                        {
+                            continue;
+                        }
 
                         // determine if the order has been updated and produce fills accordingly
                         ProcessPotentiallyUpdatedOrder(cachedOrder.Value, updatedOrder);
@@ -1322,8 +1343,8 @@ Interval	Data Available (Open)	Data Available (All)
                             {
                                 if (!_cachedOpenOrdersByTradierOrderID.TryGetValue(cachedOrderLocal.Key, out var currentCachedOrder)
                                     || updatedOrderLocal.QuantityExecuted < currentCachedOrder.Order.QuantityExecuted
-                                    // the poll cached a newer snapshot during the fetch, which only adds executed quantity to it
-                                    || updatedOrderLocal.QuantityExecuted == currentCachedOrder.Order.QuantityExecuted && currentCachedOrder.Order != snapshotBeforeFetch)
+                                    || updatedOrderLocal.QuantityExecuted == currentCachedOrder.Order.QuantityExecuted && currentCachedOrder.Order != snapshotBeforeFetch
+                                    || currentCachedOrder.AwaitsCancelAnswer(updatedOrderLocal))
                                 {
                                     return;
                                 }
@@ -1340,7 +1361,7 @@ Interval	Data Available (Open)	Data Available (All)
                         }
                         finally
                         {
-                            // signal that we've left the task, the poll adds to the guard under the same lock
+                            // signal that we've left the task
                             lock (_fillLock)
                             {
                                 _reentranceGuardByTradierOrderID.Remove(cachedOrderLocal.Key);
@@ -2241,6 +2262,10 @@ Interval	Data Available (Open)	Data Available (All)
             /// Whether this is the closing part of an order crossing zero, whose fill places the opening part
             /// </summary>
             public bool PlacesOpeningPartOnFill;
+            /// <summary>
+            /// Whether a cancel request for this order is waiting for Tradier's answer
+            /// </summary>
+            public bool CancelInFlight;
             public TradierOrder Order;
 
             public TradierCachedOpenOrder(TradierOrder order)
@@ -2258,6 +2283,16 @@ Interval	Data Available (Open)	Data Available (All)
             {
                 return !CancelPending && Order.Class == orderClass
                     && string.Equals(Order.Symbol, ticker, StringComparison.OrdinalIgnoreCase);
+            }
+
+            /// <summary>
+            /// Whether the given snapshot shows this closing part of an order crossing zero closed while its cancel
+            /// waits for Tradier's answer. Whether its fill places the opening part depends on that answer, so the
+            /// snapshot waits for the next poll
+            /// </summary>
+            public bool AwaitsCancelAnswer(TradierOrder snapshot)
+            {
+                return CancelInFlight && PlacesOpeningPartOnFill && OrderIsClosed(snapshot);
             }
         }
 

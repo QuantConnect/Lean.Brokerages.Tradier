@@ -1283,7 +1283,6 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             CollectionAssert.AreEqual(new[] { $"{BrokerageSideOrderId}" }, canceledIds);
         }
 
-        // the orders container is only meant to be deserialized, its converter doesn't write, so wrap the orders by hand
         // Whether the closing part of an order crossing zero that fills places the opening part depends on Tradier's answer
         // to the cancel, so a fill the fetch sees while the cancel request is in flight waits for that answer
         [TestCase(true)]
@@ -1317,6 +1316,11 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             InvokeCheckForFills(brokerage);
             Assert.AreEqual(cancelAccepted, brokerage.CancelOrder(order));
             WaitForTheFetchesToEnd(brokerage);
+            CollectionAssert.AreEqual(new[] { OrderStatus.Submitted }, orderEvents.Select(x => x.Status));
+
+            // the next poll fetches it again, once Tradier answered the cancel
+            InvokeCheckForFills(brokerage);
+            WaitForTheFetchesToEnd(brokerage);
 
             // the opening part would be placed in the background: give it the time to show up
             Thread.Sleep(500);
@@ -1326,6 +1330,59 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 : new[] { OrderStatus.Submitted, OrderStatus.PartiallyFilled },
                 orderEvents.Select(x => x.Status));
             Assert.AreEqual(-5m, orderEvents.Sum(x => x.FillQuantity));
+        }
+
+        // Tradier answering a cancel can take several attempts, the fill polling keeps reporting the other orders meanwhile
+        [Test]
+        public void ReportsTheFillOfAnotherOrderWhileACancelIsRetried()
+        {
+            const long otherOrderId = 1002;
+            var firstCancelAttemptFailed = new ManualResetEventSlim(false);
+            var cancelAttempts = 0;
+            var otherOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open);
+            otherOrder.Id = otherOrderId;
+            var filledOtherOrder = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m);
+            filledOtherOrder.Id = otherOrderId;
+
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var response = Interlocked.Increment(ref cancelAttempts) == 1
+                        ? CreateResponse("Service Unavailable", HttpStatusCode.ServiceUnavailable)
+                        : CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}");
+                    response.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                    if (cancelAttempts == 1)
+                    {
+                        firstCancelAttemptFailed.Set();
+                    }
+                    return response;
+                });
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse(SerializeOrders(CreateBrokerageSideOrder(TradierOrderStatus.Open), filledOtherOrder)));
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            var orderProvider = GetPrivateField<IOrderProvider>(typeof(TradierBrokerage), brokerage, "_orderProvider") as OrderProvider;
+            var otherLeanOrder = new MarketOrder(Symbols.AAPL, 10m, DateTime.UtcNow);
+            otherLeanOrder.BrokerId.Add(otherOrderId.ToStringInvariant());
+            orderProvider.Add(otherLeanOrder);
+            InvokePrivate(brokerage, "UpdateCachedOpenOrder", otherOrderId, otherOrder);
+
+            var cancel = Task.Run(() => brokerage.CancelOrder(order));
+            Assert.IsTrue(firstCancelAttemptFailed.Wait(TimeSpan.FromSeconds(10)), "The order was never canceled");
+
+            // the cancel waits 3 s before its next attempt
+            InvokeCheckForFills(brokerage);
+            Assert.IsFalse(cancel.IsCompleted);
+            Assert.AreEqual(1, orderEvents.Count);
+            Assert.AreEqual(OrderStatus.Filled, orderEvents[0].Status);
+            Assert.AreEqual(otherLeanOrder.Id, orderEvents[0].OrderId);
+            Assert.AreEqual(10m, orderEvents[0].FillQuantity);
+
+            Assert.IsTrue(cancel.Wait(TimeSpan.FromSeconds(10)));
+            Assert.IsTrue(cancel.Result);
+            Assert.AreEqual(2, cancelAttempts);
+            Assert.AreEqual(1, orderEvents.Count);
         }
 
         // The orders list can show an order as it was before what its own fetch reported: that can't take back executed quantity
@@ -1389,6 +1446,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
                 });
         }
 
+        // the orders container is only meant to be deserialized, its converter doesn't write, so wrap the orders by hand
         private static string SerializeOrders(params TradierOrder[] orders)
         {
             return $"{{\"orders\":{{\"order\":{JsonConvert.SerializeObject(orders)}}}}}";
