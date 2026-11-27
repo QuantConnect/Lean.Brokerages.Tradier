@@ -1580,7 +1580,9 @@ Interval	Data Available (Open)	Data Available (All)
                     Status = TradierOrderStatus.PartiallyFilled,
                     QuantityExecuted = brokerageSideOrder.QuantityExecuted,
                     RemainingQuantity = brokerageSideOrder.RemainingQuantity,
-                    LastFillPrice = brokerageSideOrder.LastFillPrice
+                    LastFillPrice = brokerageSideOrder.LastFillPrice,
+                    LastFillQuantity = brokerageSideOrder.LastFillQuantity,
+                    AverageFillPrice = brokerageSideOrder.AverageFillPrice
                 };
                 ProcessPotentiallyUpdatedOrder(cachedOrder, partiallyFilledOrder);
                 cachedOrder.Order = partiallyFilledOrder;
@@ -1617,8 +1619,12 @@ Interval	Data Available (Open)	Data Available (All)
                 if (fillQuantity > updatedOrder.LastFillQuantity && updatedOrder.AverageFillPrice > 0
                     && (cachedOrder.Order.QuantityExecuted == 0 || cachedOrder.Order.AverageFillPrice > 0))
                 {
-                    fillPrice = (updatedOrder.AverageFillPrice * updatedOrder.QuantityExecuted
-                        - cachedOrder.Order.AverageFillPrice * cachedOrder.Order.QuantityExecuted) / fillQuantity;
+                    var executedValue = updatedOrder.AverageFillPrice * updatedOrder.QuantityExecuted
+                        - cachedOrder.Order.AverageFillPrice * cachedOrder.Order.QuantityExecuted;
+                    if (executedValue > updatedOrder.LastFillPrice * updatedOrder.LastFillQuantity)
+                    {
+                        fillPrice = executedValue / fillQuantity;
+                    }
                 }
 
                 var orderFee = OrderFee.Zero;

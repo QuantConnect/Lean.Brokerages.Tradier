@@ -541,6 +541,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         [TestCase(4, 100, 10, 105, 110, 2, 650 / 6.0)]
         [TestCase(4, 100, 10, 0, 110, 2, 110)]
         [TestCase(4, 0, 10, 105, 110, 2, 110)]
+        [TestCase(3001, 0.03001, 3003, 0.02999, 0.01, 1, 0.01)]
         public void ReportsTheAveragePriceOfTheExecutionsSinceTheLastPoll(decimal cachedQuantityExecuted, decimal cachedAveragePrice,
             decimal quantityExecuted, decimal averagePrice, decimal lastFillPrice, decimal lastFillQuantity, double expectedFillPrice)
         {
@@ -727,14 +728,17 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
             brokerage.NewBrokerageOrderNotification += (_, e) => orderProvider.Add(e.Order);
 
-            Assert.AreEqual(BrokerageSideOrderResult.Tracked,
-                InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(status, quantityExecuted: 4m)));
+            var brokerageSideOrder = CreateBrokerageSideOrder(status, quantityExecuted: 4m);
+            brokerageSideOrder.AverageFillPrice = 105m;
+            brokerageSideOrder.LastFillPrice = 110m;
+            brokerageSideOrder.LastFillQuantity = 2m;
+            Assert.AreEqual(BrokerageSideOrderResult.Tracked, InvokeHandleBrokerageSideOrder(brokerage, brokerageSideOrder));
 
             Assert.AreEqual(3, orderEvents.Count);
             Assert.AreEqual(OrderStatus.Submitted, orderEvents[0].Status);
             Assert.AreEqual(OrderStatus.PartiallyFilled, orderEvents[1].Status);
             Assert.AreEqual(4m, orderEvents[1].FillQuantity);
-            Assert.AreEqual(123.45m, orderEvents[1].FillPrice);
+            Assert.AreEqual(105m, orderEvents[1].FillPrice);
             Assert.AreEqual(expectedFinalStatus, orderEvents[2].Status);
             Assert.AreEqual(0m, orderEvents[2].FillQuantity);
             Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
