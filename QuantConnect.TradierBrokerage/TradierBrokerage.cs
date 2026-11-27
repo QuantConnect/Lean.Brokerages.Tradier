@@ -444,9 +444,9 @@ namespace QuantConnect.Brokerages.Tradier
         /// </summary>
         /// <param name="orders">The orders, empty if there are none or the request failed</param>
         /// <param name="failureMessageType">The type of the message reporting that Tradier is still unavailable after the retries.
-        /// A disconnection lets Lean wait out a Tradier outage before stopping the algorithm, the next request retries anyway</param>
+        /// Only the fill poll reports a disconnection, which lets Lean wait out a Tradier outage, and the reconnection once it reads the orders again</param>
         /// <returns>False if the request failed, the failure was already reported</returns>
-        private bool TryGetIntradayAndPendingOrders(out List<TradierOrder> orders, BrokerageMessageType failureMessageType = BrokerageMessageType.Disconnect)
+        private bool TryGetIntradayAndPendingOrders(out List<TradierOrder> orders, BrokerageMessageType failureMessageType)
         {
             var request = new RestRequest($"accounts/{_accountId}/orders");
             var ordersContainer = Execute<TradierOrdersContainer>(request, TradierApiRequestType.Standard, failureMessageType: failureMessageType);
@@ -456,8 +456,6 @@ namespace QuantConnect.Brokerages.Tradier
             {
                 return false;
             }
-
-            OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
 
             if (ordersContainer.Orders == null)
             {
@@ -1235,7 +1233,7 @@ Interval	Data Available (Open)	Data Available (All)
                 {
                     Task.Run(() =>
                     {
-                        if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders))
+                        if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders, BrokerageMessageType.Warning))
                         {
                             return;
                         }
@@ -1272,12 +1270,14 @@ Interval	Data Available (Open)	Data Available (All)
                 return;
             }
 
+            var ordersRead = false;
             try
             {
-                if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders))
+                if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders, BrokerageMessageType.Disconnect))
                 {
                     return;
                 }
+                ordersRead = true;
 
                 var updatedOrders = intradayAndPendingOrders.ToDictionary(x => x.Id);
 
@@ -1366,7 +1366,7 @@ Interval	Data Available (Open)	Data Available (All)
                             // so don't treat orders placed externally in the account as an error
                             if (_orderProvider != null && stillUnknownOrderIDs.Count > 0)
                             {
-                                if (!TryGetIntradayAndPendingOrders(out var intradayOrders))
+                                if (!TryGetIntradayAndPendingOrders(out var intradayOrders, BrokerageMessageType.Warning))
                                 {
                                     // leave these ids unverified so the next poll rechecks them
                                     return;
@@ -1461,6 +1461,10 @@ Interval	Data Available (Open)	Data Available (All)
             }
             finally
             {
+                if (ordersRead)
+                {
+                    OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
+                }
                 Monitor.Exit(_fillLock);
             }
         }

@@ -386,6 +386,10 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.Message += (_, e) => messages.Add(e);
             List<OrderEvent> orderEvents = [];
             brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+            // the algorithm's OnBrokerageReconnect has to see the fills Tradier made during the outage
+            List<object> events = [];
+            brokerage.Message += (_, e) => events.Add(e.Type);
+            brokerage.OrdersStatusChanged += (_, statusEvents) => events.AddRange(statusEvents.Select(x => (object)x.Status));
 
             InvokeCheckForFills(brokerage);
 
@@ -404,6 +408,55 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var fill = orderEvents.Single();
             Assert.AreEqual(OrderStatus.Filled, fill.Status);
             Assert.AreEqual(10m, fill.FillQuantity);
+            CollectionAssert.AreEqual(new object[] { BrokerageMessageType.Disconnect, OrderStatus.Filled, BrokerageMessageType.Reconnect }, events);
+        }
+
+        // Only the fill poll, which runs one at a time, reports the connection state. A background read of the orders that
+        // failed while the poll succeeded used to report a disconnection after the poll's reconnection, which Lean then
+        // waited on until it stopped the algorithm, although Tradier was available
+        [Test]
+        public void DoesNotReportAFailedVerificationOfUnknownOrdersAsADisconnection()
+        {
+            var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open);
+            // the order has to look newer than the brokerage instance for the fill polling to flag it
+            brokerageSideOrder.TransactionDate = DateTime.UtcNow.AddHours(1);
+
+            // the polls run on this thread and succeed, the verification runs in the background while Tradier is unavailable to it
+            var pollThreadId = Environment.CurrentManagedThreadId;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => Environment.CurrentManagedThreadId == pollThreadId
+                ? CreateResponse(SerializeOrders(brokerageSideOrder))
+                : CreateResponse(ServiceUnavailablePage, HttpStatusCode.ServiceUnavailable));
+
+            var brokerage = CreateBrokerageWithOrderTracking(new OrderProvider(), restClient.Object);
+            List<BrokerageMessageEvent> messages = [];
+            var verificationFailed = new ManualResetEventSlim();
+            brokerage.Message += (_, e) =>
+            {
+                lock (messages) { messages.Add(e); }
+                if (e.Code == "ServiceUnavailable")
+                {
+                    verificationFailed.Set();
+                }
+            };
+
+            InvokeCheckForFills(brokerage);
+
+            // the verification starts two seconds after the order is flagged and retries for about 30 seconds, keep polling meanwhile
+            var deadline = DateTime.UtcNow.AddSeconds(60);
+            while (!verificationFailed.Wait(TimeSpan.FromMilliseconds(500)))
+            {
+                Assert.Less(DateTime.UtcNow, deadline, "The verification never failed");
+                InvokeCheckForFills(brokerage);
+            }
+            InvokeCheckForFills(brokerage);
+
+            lock (messages)
+            {
+                var warning = messages.Single();
+                Assert.AreEqual(BrokerageMessageType.Warning, warning.Type);
+                Assert.AreEqual("ServiceUnavailable", warning.Code);
+            }
         }
 
         // Waiting only helps while Tradier is unavailable: a client error, e.g. an account the token can't access, still stops the algorithm
