@@ -905,7 +905,8 @@ Interval	Data Available (Open)	Data Available (All)
             }
 
             // before doing anything, verify only one outstanding order per symbol
-            var cachedOpenOrder = _cachedOpenOrdersByTradierOrderID.FirstOrDefault(x => x.Value.Order.Symbol == order.Symbol.Value).Value;
+            var orderClass = ConvertSecurityType(order.SecurityType);
+            var cachedOpenOrder = _cachedOpenOrdersByTradierOrderID.Values.FirstOrDefault(x => x.IsActiveFor(orderClass, order.Symbol.Value));
             if (cachedOpenOrder != null)
             {
                 var qcOrder = _orderProvider.GetOrdersByBrokerageId(cachedOpenOrder.Order.Id)?.SingleOrDefault();
@@ -968,6 +969,10 @@ Interval	Data Available (Open)	Data Available (All)
             {
                 return new CrossZeroOrderResponse(string.Empty, false);
             }
+            if (isPlaceOrderWithLeanEvent && _cachedOpenOrdersByTradierOrderID.TryGetValue(response.Order.Id, out var closingPart))
+            {
+                closingPart.PlacesOpeningPartOnFill = true;
+            }
             return new CrossZeroOrderResponse(response.Order.Id.ToStringInvariant(), true);
         }
 
@@ -994,12 +999,9 @@ Interval	Data Available (Open)	Data Available (All)
             }
 
             // there's only one active tradier order per qc order, find it
-            var activeOrder = (
-                from brokerId in order.BrokerId
-                let id = Parse.Long(brokerId)
-                where _cachedOpenOrdersByTradierOrderID.ContainsKey(id)
-                select _cachedOpenOrdersByTradierOrderID[id]
-                ).SingleOrDefault();
+            var activeOrder = order.BrokerId
+                .Select(brokerId => _cachedOpenOrdersByTradierOrderID.TryGetValue(Parse.Long(brokerId), out var cached) ? cached : null)
+                .SingleOrDefault(cached => cached != null && !cached.CancelPending);
 
             if (activeOrder == null)
             {
@@ -1052,26 +1054,46 @@ Interval	Data Available (Open)	Data Available (All)
             _cancelledQcOrderIDs.Add(order.Id);
 
             var cancelRequested = false;
-            foreach (var orderID in order.BrokerId)
+            List<string> brokerIds;
+            List<TradierCachedOpenOrder> cancelsInFlight;
+            lock (_fillLock)
             {
-                var id = Parse.Long(orderID);
-                var response = CancelOrder(id, out var rawContent);
-                if (response == null)
+                brokerIds = order.BrokerId.ToList();
+                cancelsInFlight = brokerIds
+                    .Select(id => _cachedOpenOrdersByTradierOrderID.TryGetValue(Parse.Long(id), out var cached) ? cached : null)
+                    .Where(cached => cached != null)
+                    .ToList();
+                cancelsInFlight.ForEach(cached => cached.CancelInFlight = true);
+            }
+
+            try
+            {
+                foreach (var orderID in brokerIds)
                 {
-                    // the filled closing part of an order crossing zero mustn't keep its opening part from being canceled
-                    if (rawContent != null && rawContent.Contains(OrderAlreadyFinalizedError))
+                    var id = Parse.Long(orderID);
+                    var response = CancelOrder(id, out var rawContent);
+                    if (response == null)
                     {
-                        continue;
+                        // the filled closing part of an order crossing zero mustn't keep its opening part from being canceled
+                        if (rawContent != null && rawContent.Contains(OrderAlreadyFinalizedError))
+                        {
+                            continue;
+                        }
+                        return false;
                     }
-                    return false;
+                    cancelRequested = true;
+                    if (response.Errors.Errors.IsNullOrEmpty() && response.Order.Status == "ok"
+                        && _cachedOpenOrdersByTradierOrderID.TryGetValue(id, out var tradierOrder))
+                    {
+                        tradierOrder.CancelPending = true;
+                    }
                 }
-                cancelRequested = true;
-                if (response.Errors.Errors.IsNullOrEmpty() && response.Order.Status == "ok")
+            }
+            finally
+            {
+                lock (_fillLock)
                 {
-                    TradierCachedOpenOrder tradierOrder;
-                    _cachedOpenOrdersByTradierOrderID.TryRemove(id, out tradierOrder);
-                    OnOrderEvent(new OrderEvent(order, DateTime.UtcNow, OrderFee.Zero, "Tradier Order Event")
-                    { Status = OrderStatus.Canceled });
+                    cancelsInFlight.ForEach(cached => cached.CancelInFlight = false);
                 }
             }
 
@@ -1278,6 +1300,12 @@ Interval	Data Available (Open)	Data Available (All)
                     var hasUpdatedOrder = updatedOrders.TryGetValue(cachedOrder.Key, out updatedOrder);
                     if (hasUpdatedOrder)
                     {
+                        if (updatedOrder.QuantityExecuted < cachedOrder.Value.Order.QuantityExecuted
+                            || cachedOrder.Value.AwaitsCancelAnswer(updatedOrder))
+                        {
+                            continue;
+                        }
+
                         // determine if the order has been updated and produce fills accordingly
                         ProcessPotentiallyUpdatedOrder(cachedOrder.Value, updatedOrder);
 
@@ -1295,6 +1323,7 @@ Interval	Data Available (Open)	Data Available (All)
                     }
 
                     var cachedOrderLocal = cachedOrder;
+                    var snapshotBeforeFetch = cachedOrder.Value.Order;
                     Task.Run(() =>
                     {
                         try
@@ -1305,9 +1334,24 @@ Interval	Data Available (Open)	Data Available (All)
                                 Log.Error($"TradierBrokerage.CheckForFills(): Unable to locate order {cachedOrderLocal.Key} in cached open orders.");
                                 throw new InvalidOperationException("TradierBrokerage.CheckForFills(): GetOrder() return null response");
                             }
+                            if (updatedOrderLocal.Id != cachedOrderLocal.Key)
+                            {
+                                return;
+                            }
 
-                            UpdateCachedOpenOrder(cachedOrderLocal.Key, updatedOrderLocal);
-                            ProcessPotentiallyUpdatedOrder(cachedOrderLocal.Value, updatedOrderLocal);
+                            lock (_fillLock)
+                            {
+                                if (!_cachedOpenOrdersByTradierOrderID.TryGetValue(cachedOrderLocal.Key, out var currentCachedOrder)
+                                    || updatedOrderLocal.QuantityExecuted < currentCachedOrder.Order.QuantityExecuted
+                                    || updatedOrderLocal.QuantityExecuted == currentCachedOrder.Order.QuantityExecuted && currentCachedOrder.Order != snapshotBeforeFetch
+                                    || currentCachedOrder.AwaitsCancelAnswer(updatedOrderLocal))
+                                {
+                                    return;
+                                }
+
+                                ProcessPotentiallyUpdatedOrder(currentCachedOrder, updatedOrderLocal);
+                                if (!OrderIsClosed(updatedOrderLocal)) UpdateCachedOpenOrder(cachedOrderLocal.Key, updatedOrderLocal);
+                            }
                         }
                         catch (Exception err)
                         {
@@ -1318,7 +1362,10 @@ Interval	Data Available (Open)	Data Available (All)
                         finally
                         {
                             // signal that we've left the task
-                            _reentranceGuardByTradierOrderID.Remove(cachedOrderLocal.Key);
+                            lock (_fillLock)
+                            {
+                                _reentranceGuardByTradierOrderID.Remove(cachedOrderLocal.Key);
+                            }
                         }
                     });
                 }
@@ -1538,23 +1585,6 @@ Interval	Data Available (Open)	Data Available (All)
             OnOrderEvent(new OrderEvent(leanOrder, DateTime.UtcNow, OrderFee.Zero, "Order was submitted outside Lean")
             { Status = OrderStatus.Submitted });
 
-            // Lean only applies fills carried by a fill status, so a closed order that executed part of its quantity
-            // has to report that fill before its final status
-            if (isClosed && brokerageSideOrder.Status != TradierOrderStatus.Filled && brokerageSideOrder.QuantityExecuted > 0)
-            {
-                var partiallyFilledOrder = new TradierOrder
-                {
-                    Id = brokerageSideOrder.Id,
-                    Direction = brokerageSideOrder.Direction,
-                    Status = TradierOrderStatus.PartiallyFilled,
-                    QuantityExecuted = brokerageSideOrder.QuantityExecuted,
-                    RemainingQuantity = brokerageSideOrder.RemainingQuantity,
-                    LastFillPrice = brokerageSideOrder.LastFillPrice
-                };
-                ProcessPotentiallyUpdatedOrder(cachedOrder, partiallyFilledOrder);
-                cachedOrder.Order = partiallyFilledOrder;
-            }
-
             // this drops the order from the cache if it's closed
             ProcessPotentiallyUpdatedOrder(cachedOrder, brokerageSideOrder);
             if (!isClosed)
@@ -1565,6 +1595,24 @@ Interval	Data Available (Open)	Data Available (All)
 
         private void ProcessPotentiallyUpdatedOrder(TradierCachedOpenOrder cachedOrder, TradierOrder updatedOrder)
         {
+            // Lean only applies fills carried by a fill status, so a closed order that executed part of its quantity
+            // has to report that fill before its final status
+            if (OrderIsClosed(updatedOrder) && updatedOrder.Status != TradierOrderStatus.Filled
+                && updatedOrder.QuantityExecuted > cachedOrder.Order.QuantityExecuted)
+            {
+                var partiallyFilledOrder = new TradierOrder
+                {
+                    Id = updatedOrder.Id,
+                    Direction = updatedOrder.Direction,
+                    Status = TradierOrderStatus.PartiallyFilled,
+                    QuantityExecuted = updatedOrder.QuantityExecuted,
+                    RemainingQuantity = updatedOrder.RemainingQuantity,
+                    LastFillPrice = updatedOrder.LastFillPrice
+                };
+                ProcessPotentiallyUpdatedOrder(cachedOrder, partiallyFilledOrder);
+                cachedOrder.Order = partiallyFilledOrder;
+            }
+
             // check for fills or status changes, for either fire a fill event
             if (updatedOrder.RemainingQuantity != cachedOrder.Order.RemainingQuantity
              || ConvertStatus(updatedOrder.Status) != ConvertStatus(cachedOrder.Order.Status))
@@ -1610,6 +1658,13 @@ Interval	Data Available (Open)	Data Available (All)
                     var security = _securityProvider.GetSecurity(qcOrder.Symbol);
                     fill.OrderFee = security.FeeModel.GetOrderFee(
                         new OrderFeeParameters(security, qcOrder));
+                }
+
+                if (leanOrderStatus == OrderStatus.Filled && cachedOrder.CancelPending && cachedOrder.PlacesOpeningPartOnFill)
+                {
+                    fill.Status = OrderStatus.PartiallyFilled;
+                    OnOrderEvent(fill);
+                    fill = new OrderEvent(qcOrder, DateTime.UtcNow, OrderFee.Zero, "Tradier Order Event") { Status = OrderStatus.Canceled };
                 }
 
                 // if we filled the order and have another contingent order waiting, submit it
@@ -2202,11 +2257,42 @@ Interval	Data Available (Open)	Data Available (All)
         private class TradierCachedOpenOrder
         {
             public bool EmittedOrderFee;
+            public bool CancelPending;
+            /// <summary>
+            /// Whether this is the closing part of an order crossing zero, whose fill places the opening part
+            /// </summary>
+            public bool PlacesOpeningPartOnFill;
+            /// <summary>
+            /// Whether a cancel request for this order is waiting for Tradier's answer
+            /// </summary>
+            public bool CancelInFlight;
             public TradierOrder Order;
 
             public TradierCachedOpenOrder(TradierOrder order)
             {
                 Order = order;
+            }
+
+            /// <summary>
+            /// Whether this is the active order of the given security, the one a new order for that security has to
+            /// replace. Tradier lists an option order under its underlying's ticker, so the order class is part of the
+            /// match. An order waiting for Tradier to confirm its cancellation is not active any more: it stays cached
+            /// only until the fill polling sees it closed
+            /// </summary>
+            public bool IsActiveFor(TradierOrderClass orderClass, string ticker)
+            {
+                return !CancelPending && Order.Class == orderClass
+                    && string.Equals(Order.Symbol, ticker, StringComparison.OrdinalIgnoreCase);
+            }
+
+            /// <summary>
+            /// Whether the given snapshot shows this closing part of an order crossing zero closed while its cancel
+            /// waits for Tradier's answer. Whether its fill places the opening part depends on that answer, so the
+            /// snapshot waits for the next poll
+            /// </summary>
+            public bool AwaitsCancelAnswer(TradierOrder snapshot)
+            {
+                return CancelInFlight && PlacesOpeningPartOnFill && OrderIsClosed(snapshot);
             }
         }
 

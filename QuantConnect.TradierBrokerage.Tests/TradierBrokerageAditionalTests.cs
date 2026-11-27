@@ -818,7 +818,665 @@ namespace QuantConnect.Tests.Brokerages.Tradier
 
             Assert.AreEqual(expectedCanceled, brokerage.CancelOrder(order));
             CollectionAssert.AreEqual(new[] { "1001", "1002" }, canceledIds);
-            Assert.AreEqual(expectedCanceled ? 1 : 0, orderEvents.Count(x => x.Status == OrderStatus.Canceled));
+            // Tradier only accepted the request, the fill polling reports the cancellation once Tradier did it
+            CollectionAssert.IsEmpty(orderEvents);
+        }
+
+        // Tradier accepting a cancel request doesn't mean the order stopped executing, and an order can close between two
+        // polls. Lean only applies fills carried by a fill status, so what the order executed since the last poll has to be
+        // reported on its own, before the final status
+        [TestCase(true, TradierOrderStatus.Canceled, OrderStatus.Canceled)]
+        [TestCase(false, TradierOrderStatus.Canceled, OrderStatus.Canceled)]
+        [TestCase(false, TradierOrderStatus.Expired, OrderStatus.Invalid)]
+        [TestCase(false, TradierOrderStatus.Rejected, OrderStatus.Invalid)]
+        public void ReportsWhatAnOrderExecutedBeforeItClosed(bool cancel, TradierOrderStatus finalStatus, OrderStatus expectedFinalStatus)
+        {
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET)))
+                .Returns(() => CreateResponse(SerializeOrders(CreateBrokerageSideOrder(finalStatus, quantityExecuted: 4m))));
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+
+            if (cancel)
+            {
+                Assert.IsTrue(brokerage.CancelOrder(order));
+                CollectionAssert.IsEmpty(orderEvents);
+                Assert.IsTrue(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+            }
+
+            InvokeCheckForFills(brokerage);
+
+            Assert.AreEqual(2, orderEvents.Count);
+            Assert.AreEqual(OrderStatus.PartiallyFilled, orderEvents[0].Status);
+            Assert.AreEqual(4m, orderEvents[0].FillQuantity);
+            Assert.AreEqual(123.45m, orderEvents[0].FillPrice);
+            Assert.AreEqual(expectedFinalStatus, orderEvents[1].Status);
+            Assert.AreEqual(0m, orderEvents[1].FillQuantity);
+            Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // An order missing from the orders list is fetched on its own. The order of an accepted cancel has to report its
+        // cancellation that way too, else it stays pending in Lean
+        [Test]
+        public void ReportsTheCancellationOfAnOrderMissingFromTheOrdersList()
+        {
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse("{\"orders\":\"null\"}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith($"/orders/{BrokerageSideOrderId}") && r.Method == Method.GET)))
+                .Returns(() => CreateResponse($"{{\"order\":{JsonConvert.SerializeObject(CreateBrokerageSideOrder(TradierOrderStatus.Canceled))}}}"));
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            Assert.IsTrue(brokerage.CancelOrder(order));
+
+            InvokeCheckForFills(brokerage);
+
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId))
+            {
+                Assert.Less(DateTime.UtcNow, deadline, "The order was never fetched");
+                Thread.Sleep(50);
+            }
+            CollectionAssert.AreEqual(new[] { OrderStatus.Canceled }, orderEvents.Select(x => x.Status));
+        }
+
+        // An empty response for an order fetched on its own holds no order: it mustn't take the place of the cached one, nor
+        // report anything, even for the order of an accepted cancel
+        [Test]
+        public void IgnoresAnEmptyResponseForAnOrderMissingFromTheOrdersList()
+        {
+            var fetched = new ManualResetEventSlim(false);
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse("{\"orders\":\"null\"}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith($"/orders/{BrokerageSideOrderId}") && r.Method == Method.GET)))
+                .Returns(() =>
+                {
+                    fetched.Set();
+                    return CreateResponse("{\"order\":null}");
+                });
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            List<BrokerageMessageEvent> messages = [];
+            brokerage.Message += (_, message) => messages.Add(message);
+            Assert.IsTrue(brokerage.CancelOrder(order));
+
+            InvokeCheckForFills(brokerage);
+
+            Assert.IsTrue(fetched.Wait(TimeSpan.FromSeconds(10)), "The order was never fetched");
+            WaitForTheFetchesToEnd(brokerage);
+            CollectionAssert.IsEmpty(orderEvents);
+            CollectionAssert.IsEmpty(messages.Where(x => x.Type != BrokerageMessageType.Information));
+            Assert.IsTrue(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // An order fetched on its own is compared with the cached one before it's cached, so a fill it carries is reported
+        [TestCase(false, TradierOrderStatus.PartiallyFilled, new[] { OrderStatus.PartiallyFilled })]
+        [TestCase(true, TradierOrderStatus.PartiallyFilled, new[] { OrderStatus.PartiallyFilled })]
+        [TestCase(false, TradierOrderStatus.Filled, new[] { OrderStatus.Filled })]
+        [TestCase(true, TradierOrderStatus.Canceled, new[] { OrderStatus.PartiallyFilled, OrderStatus.Canceled })]
+        public void ReportsTheFillOfAnOrderMissingFromTheOrdersList(bool cancel, TradierOrderStatus fetchedStatus, OrderStatus[] expectedStatuses)
+        {
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse("{\"orders\":\"null\"}"));
+            var executed = fetchedStatus == TradierOrderStatus.Filled ? 10m : 4m;
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith($"/orders/{BrokerageSideOrderId}") && r.Method == Method.GET)))
+                .Returns(() => CreateResponse($"{{\"order\":{JsonConvert.SerializeObject(CreateBrokerageSideOrder(fetchedStatus, executed))}}}"));
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            if (cancel)
+            {
+                Assert.IsTrue(brokerage.CancelOrder(order));
+            }
+
+            InvokeCheckForFills(brokerage);
+            WaitForTheFetchesToEnd(brokerage);
+
+            CollectionAssert.AreEqual(expectedStatuses, orderEvents.Select(x => x.Status));
+            Assert.AreEqual(executed, orderEvents[0].FillQuantity);
+            Assert.AreEqual(fetchedStatus == TradierOrderStatus.PartiallyFilled, GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // The orders list can show the order again while its own fetch is in flight. The fetch then mustn't report again what
+        // the regular poll reported, nor bring back an older state of the order
+        [TestCase(TradierOrderStatus.Filled, 10, TradierOrderStatus.Filled, 10, new[] { OrderStatus.Filled }, false)]
+        [TestCase(TradierOrderStatus.Canceled, 4, TradierOrderStatus.Canceled, 4, new[] { OrderStatus.PartiallyFilled, OrderStatus.Canceled }, false)]
+        [TestCase(TradierOrderStatus.PartiallyFilled, 4, TradierOrderStatus.Open, 0, new[] { OrderStatus.PartiallyFilled }, true)]
+        [TestCase(TradierOrderStatus.Open, 0, TradierOrderStatus.Pending, 0, new OrderStatus[0], true)]
+        public void ReportsAnOrderOnceWhenThePollAndItsOwnFetchOverlap(TradierOrderStatus listedStatus, decimal listedExecuted,
+            TradierOrderStatus fetchedStatus, decimal fetchedExecuted, OrderStatus[] expectedStatuses, bool expectedCached)
+        {
+            var listRequests = 0;
+            var fetchStarted = new ManualResetEventSlim(false);
+            var releaseFetch = new ManualResetEventSlim(false);
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse(Interlocked.Increment(ref listRequests) == 1
+                    ? "{\"orders\":\"null\"}"
+                    : SerializeOrders(CreateBrokerageSideOrder(listedStatus, listedExecuted))));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith($"/orders/{BrokerageSideOrderId}") && r.Method == Method.GET)))
+                .Returns(() =>
+                {
+                    fetchStarted.Set();
+                    releaseFetch.Wait(TimeSpan.FromSeconds(10));
+                    return CreateResponse($"{{\"order\":{JsonConvert.SerializeObject(CreateBrokerageSideOrder(fetchedStatus, fetchedExecuted))}}}");
+                });
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            Assert.IsTrue(brokerage.CancelOrder(order));
+
+            InvokeCheckForFills(brokerage);
+            Assert.IsTrue(fetchStarted.Wait(TimeSpan.FromSeconds(10)), "The order was never fetched");
+            InvokeCheckForFills(brokerage);
+            releaseFetch.Set();
+            WaitForTheFetchesToEnd(brokerage);
+
+            CollectionAssert.AreEqual(expectedStatuses, orderEvents.Select(x => x.Status));
+            Assert.AreEqual(listedExecuted, orderEvents.Sum(x => x.FillQuantity));
+            Assert.AreEqual(expectedCached, GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+            if (expectedCached)
+            {
+                var cachedOrder = GetCachedOpenOrders(brokerage)[BrokerageSideOrderId];
+                var cachedTradierOrder = (TradierOrder)cachedOrder.GetType().GetField("Order").GetValue(cachedOrder);
+                Assert.AreEqual(listedExecuted, cachedTradierOrder.QuantityExecuted);
+                Assert.AreEqual(listedStatus, cachedTradierOrder.Status);
+            }
+        }
+
+        // The fetch can see the order canceled before Tradier answers the cancel request, its cancellation is still reported
+        [Test]
+        public void ReportsTheCancellationAnOrderFetchReturnsBeforeTheCancelRequestIsAnswered()
+        {
+            var restClient = new Mock<IRestClient>();
+            SetUpAFetchAnsweringDuringTheCancelRequest(restClient, CreateBrokerageSideOrder(TradierOrderStatus.Canceled),
+                CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+
+            InvokeCheckForFills(brokerage);
+            Assert.IsTrue(brokerage.CancelOrder(order));
+            WaitForTheFetchesToEnd(brokerage);
+
+            CollectionAssert.AreEqual(new[] { OrderStatus.Canceled }, orderEvents.Select(x => x.Status));
+            Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // Tradier accepted the cancel of the order, so it isn't active any more: updating it sends nothing
+        [TestCase(true)]
+        [TestCase(false)]
+        public void DoesNotUpdateAnOrderWhoseCancelWasAccepted(bool cancelAccepted)
+        {
+            var updateRequests = 0;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.PUT)))
+                .Returns(() =>
+                {
+                    updateRequests++;
+                    return CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}");
+                });
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            if (cancelAccepted)
+            {
+                Assert.IsTrue(brokerage.CancelOrder(order));
+            }
+
+            Assert.AreEqual(!cancelAccepted, brokerage.UpdateOrder(order));
+            Assert.AreEqual(cancelAccepted ? 0 : 1, updateRequests);
+            CollectionAssert.AreEqual(cancelAccepted ? Array.Empty<OrderStatus>() : new[] { OrderStatus.UpdateSubmitted },
+                orderEvents.Select(x => x.Status));
+        }
+
+        // The order of an accepted cancel stays cached until the fill polling sees it canceled, a new order for the same
+        // symbol mustn't cancel it again
+        [TestCase(true)]
+        [TestCase(false)]
+        public void CancelsTheOutstandingOrderOfTheSymbolUnlessItsCancelWasAccepted(bool cancelAccepted)
+        {
+            var cancelRequests = 0;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() =>
+                {
+                    cancelRequests++;
+                    return CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}");
+                });
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse("{\"order\":{\"id\":1235,\"status\":\"ok\"}}"));
+
+            var (brokerage, order, _) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            if (cancelAccepted)
+            {
+                Assert.IsTrue(brokerage.CancelOrder(order));
+            }
+
+            Assert.IsTrue(brokerage.PlaceOrder(new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow)));
+            // either the cancel of the order or placing the new one cancels it, never both
+            Assert.AreEqual(1, cancelRequests);
+        }
+
+        // An order crossing zero is placed as a closing and an opening Tradier order. Once the closing one filled, canceling
+        // the opening one has to report what it executed before Tradier canceled it
+        [Test]
+        public void ReportsWhatTheOpeningPartOfAnOrderCrossingZeroExecutedBeforeItsCancel()
+        {
+            var closingPart = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 5m);
+            closingPart.Id = 1001;
+            closingPart.Quantity = 5m;
+            closingPart.RemainingQuantity = 0m;
+            closingPart.Direction = TradierOrderDirection.Sell;
+            var openingPart = CreateBrokerageSideOrder(TradierOrderStatus.Canceled, quantityExecuted: 3m);
+            openingPart.Id = 1002;
+            openingPart.Quantity = 5m;
+            openingPart.RemainingQuantity = 2m;
+            openingPart.Direction = TradierOrderDirection.SellShort;
+
+            var placedOrderIds = new Queue<long>([closingPart.Id, openingPart.Id]);
+            var polledOrders = new[] { closingPart };
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{placedOrderIds.Dequeue()},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET)))
+                .Returns(() => CreateResponse(SerializeOrders(polledOrders)));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var response = request.Resource.EndsWith($"/{closingPart.Id}")
+                        ? CreateResponse(FinalizedOrderResponse, HttpStatusCode.BadRequest)
+                        : CreateResponse($"{{\"order\":{{\"id\":{openingPart.Id},\"status\":\"ok\"}}}}");
+                    response.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                    return response;
+                });
+
+            var orderProvider = new OrderProvider();
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
+            var securityProvider = GetPrivateField<ISecurityProvider>(typeof(TradierBrokerage), brokerage, "_securityProvider");
+            securityProvider.GetSecurity(Symbols.SPY).Holdings.SetHoldings(100m, 5m);
+            List<OrderEvent> orderEvents = [];
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            var order = new MarketOrder(Symbols.SPY, -10m, DateTime.UtcNow);
+            orderProvider.Add(order);
+            Assert.IsTrue(brokerage.PlaceOrder(order));
+
+            // the closing part fills, which places the opening part
+            InvokeCheckForFills(brokerage);
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (!GetCachedOpenOrders(brokerage).Contains(openingPart.Id))
+            {
+                Assert.Less(DateTime.UtcNow, deadline, "The opening part was never placed");
+                Thread.Sleep(50);
+            }
+
+            Assert.IsTrue(brokerage.CancelOrder(order));
+            polledOrders = [closingPart, openingPart];
+            InvokeCheckForFills(brokerage);
+
+            CollectionAssert.AreEqual(new[] { OrderStatus.Submitted, OrderStatus.PartiallyFilled, OrderStatus.PartiallyFilled, OrderStatus.Canceled },
+                orderEvents.Select(x => x.Status));
+            CollectionAssert.AreEqual(new[] { 0m, -5m, -3m, 0m }, orderEvents.Select(x => x.FillQuantity));
+            Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(openingPart.Id));
+        }
+
+        // Lean applies the quantity of an update before the brokerage rejects it, and doesn't take it back
+        [TestCase(false)]
+        [TestCase(true)]
+        public void DropsTheOpeningPartOfAnOrderCrossingZeroWhoseClosingPartFilledAfterItsCancelWasAccepted(bool rejectedQuantityUpdate)
+        {
+            var closingPart = CreateBrokerageSideOrder(TradierOrderStatus.Open);
+            closingPart.Id = 1001;
+            closingPart.Quantity = 5m;
+            closingPart.RemainingQuantity = 5m;
+            closingPart.Direction = TradierOrderDirection.Sell;
+
+            var placedOrderIds = new Queue<long>([closingPart.Id, 1002]);
+            var polledOrders = new[] { closingPart };
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{placedOrderIds.Dequeue()},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET)))
+                .Returns(() => CreateResponse(SerializeOrders(polledOrders)));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var response = CreateResponse($"{{\"order\":{{\"id\":{closingPart.Id},\"status\":\"ok\"}}}}");
+                    response.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                    return response;
+                });
+
+            var orderProvider = new OrderProvider();
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
+            var securityProvider = GetPrivateField<ISecurityProvider>(typeof(TradierBrokerage), brokerage, "_securityProvider");
+            securityProvider.GetSecurity(Symbols.SPY).Holdings.SetHoldings(100m, 5m);
+            List<OrderEvent> orderEvents = [];
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            var order = new MarketOrder(Symbols.SPY, -10m, DateTime.UtcNow);
+            orderProvider.Add(order);
+            Assert.IsTrue(brokerage.PlaceOrder(order));
+            InvokeCheckForFills(brokerage);
+            if (rejectedQuantityUpdate)
+            {
+                order.ApplyUpdateOrderRequest(new UpdateOrderRequest(DateTime.UtcNow, order.Id, new UpdateOrderFields { Quantity = -5m }));
+            }
+
+            // Tradier accepts the cancel, but the closing part fills before Tradier cancels it
+            Assert.IsTrue(brokerage.CancelOrder(order));
+            var filledClosingPart = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 5m);
+            filledClosingPart.Id = closingPart.Id;
+            filledClosingPart.Quantity = 5m;
+            filledClosingPart.RemainingQuantity = 0m;
+            filledClosingPart.Direction = TradierOrderDirection.Sell;
+            polledOrders = [filledClosingPart];
+            InvokeCheckForFills(brokerage);
+
+            // the opening part would be placed in the background: give it the time to show up
+            Thread.Sleep(500);
+            restClient.Verify(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)), Times.Once);
+            CollectionAssert.AreEqual(new[] { OrderStatus.Submitted, OrderStatus.PartiallyFilled, OrderStatus.Canceled },
+                orderEvents.Select(x => x.Status));
+            CollectionAssert.AreEqual(new[] { 0m, -5m, 0m }, orderEvents.Select(x => x.FillQuantity));
+            Assert.IsEmpty(GetCachedOpenOrders(brokerage));
+        }
+
+        // Placing an order cancels the symbol's outstanding one. The order of an accepted cancel stays cached until the fill
+        // polling sees it canceled, it mustn't hide a later order that is still working
+        [TestCase(false)]
+        [TestCase(true)]
+        public void CancelsTheWorkingOrderOfTheSymbolBehindOneBeingCanceled(bool cancelFirstOrder)
+        {
+            List<string> canceledIds = [];
+            var placedOrderIds = new Queue<long>([1235, 1236]);
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var id = request.Resource.Split('/').Last();
+                    canceledIds.Add(id);
+                    return CreateResponse($"{{\"order\":{{\"id\":{id},\"status\":\"ok\"}}}}");
+                });
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{placedOrderIds.Dequeue()},\"status\":\"ok\"}}}}"));
+
+            var (brokerage, firstOrder, _) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            if (cancelFirstOrder)
+            {
+                Assert.IsTrue(brokerage.CancelOrder(firstOrder));
+            }
+            var orderProvider = GetPrivateField<IOrderProvider>(typeof(TradierBrokerage), brokerage, "_orderProvider") as OrderProvider;
+
+            var secondOrder = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            orderProvider.Add(secondOrder);
+            Assert.IsTrue(brokerage.PlaceOrder(secondOrder));
+            secondOrder.Status = OrderStatus.Submitted;
+
+            var thirdOrder = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            orderProvider.Add(thirdOrder);
+            Assert.IsTrue(brokerage.PlaceOrder(thirdOrder));
+
+            // the first order is canceled once, either on its own or by placing the second one
+            CollectionAssert.AreEqual(new[] { $"{BrokerageSideOrderId}", "1235" }, canceledIds);
+        }
+
+        // Tradier lists an option order under its underlying's ticker: replacing a stock order mustn't cancel the working
+        // orders of the options on it
+        [TestCase(false)]
+        [TestCase(true)]
+        public void PlacingAnOrderLeavesTheWorkingOrdersOfOtherSecuritiesOnTheSameTicker(bool cancelStockOrder)
+        {
+            List<string> canceledIds = [];
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var id = request.Resource.Split('/').Last();
+                    canceledIds.Add(id);
+                    return CreateResponse($"{{\"order\":{{\"id\":{id},\"status\":\"ok\"}}}}");
+                });
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse("{\"order\":{\"id\":1237,\"status\":\"ok\"}}"));
+
+            var (brokerage, stockOrder, _) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            if (cancelStockOrder)
+            {
+                Assert.IsTrue(brokerage.CancelOrder(stockOrder));
+            }
+            var orderProvider = GetPrivateField<IOrderProvider>(typeof(TradierBrokerage), brokerage, "_orderProvider") as OrderProvider;
+
+            var expiry = new DateTime(2025, 06, 20);
+            var contracts = new[]
+            {
+                (Id: 1235L, Right: OptionRight.Call, Ticker: "SPY250620C00500000"),
+                (Id: 1236L, Right: OptionRight.Put, Ticker: "SPY250620P00500000")
+            };
+            foreach (var contract in contracts)
+            {
+                var option = Symbol.CreateOption(Symbols.SPY, Market.USA, OptionStyle.American, contract.Right, 500m, expiry);
+                var optionOrder = new LimitOrder(option, 1m, 1m, DateTime.UtcNow) { Status = OrderStatus.Submitted };
+                optionOrder.BrokerId.Add(contract.Id.ToStringInvariant());
+                orderProvider.Add(optionOrder);
+
+                var brokerageSideOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open, type: TradierOrderType.Limit,
+                    orderClass: TradierOrderClass.Option);
+                brokerageSideOrder.Id = contract.Id;
+                brokerageSideOrder.OptionSymbol = contract.Ticker;
+                InvokePrivate(brokerage, "UpdateCachedOpenOrder", contract.Id, brokerageSideOrder);
+            }
+
+            var newStockOrder = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            orderProvider.Add(newStockOrder);
+            Assert.IsTrue(brokerage.PlaceOrder(newStockOrder));
+
+            // the stock order is canceled once, either on its own or by placing the new one
+            CollectionAssert.AreEqual(new[] { $"{BrokerageSideOrderId}" }, canceledIds);
+        }
+
+        // Whether the closing part of an order crossing zero that fills places the opening part depends on Tradier's answer
+        // to the cancel, so a fill the poll sees while the cancel request is in flight, in the orders list or through the
+        // order's own fetch, waits for that answer
+        [TestCase(true, false)]
+        [TestCase(false, false)]
+        [TestCase(true, true)]
+        [TestCase(false, true)]
+        public void PlacesTheOpeningPartOfAnOrderCrossingZeroFilledDuringItsCancelOnlyIfTradierRefusedIt(bool cancelAccepted, bool listed)
+        {
+            var filledClosingPart = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 5m);
+            filledClosingPart.Quantity = 5m;
+            filledClosingPart.RemainingQuantity = 0m;
+            filledClosingPart.Direction = TradierOrderDirection.Sell;
+            var placedOrderIds = new Queue<long>([BrokerageSideOrderId, 1002]);
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{placedOrderIds.Dequeue()},\"status\":\"ok\"}}}}"));
+            var cancelResponse = cancelAccepted
+                ? CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}")
+                : CreateResponse(FinalizedOrderResponse, HttpStatusCode.BadRequest);
+            var cancelRequested = new ManualResetEventSlim(false);
+            var polledDuringTheCancel = new ManualResetEventSlim(false);
+            if (listed)
+            {
+                restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                    .Returns<IRestRequest>(request =>
+                    {
+                        cancelRequested.Set();
+                        Assert.IsTrue(polledDuringTheCancel.Wait(TimeSpan.FromSeconds(10)), "The orders were never polled");
+                        cancelResponse.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                        return cancelResponse;
+                    });
+                restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                    .Returns(() => CreateResponse(SerializeOrders(filledClosingPart)));
+            }
+            else
+            {
+                SetUpAFetchAnsweringDuringTheCancelRequest(restClient, filledClosingPart, cancelResponse);
+            }
+
+            var orderProvider = new OrderProvider();
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
+            var securityProvider = GetPrivateField<ISecurityProvider>(typeof(TradierBrokerage), brokerage, "_securityProvider");
+            securityProvider.GetSecurity(Symbols.SPY).Holdings.SetHoldings(100m, 5m);
+            List<OrderEvent> orderEvents = [];
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+            var order = new MarketOrder(Symbols.SPY, -10m, DateTime.UtcNow);
+            orderProvider.Add(order);
+            Assert.IsTrue(brokerage.PlaceOrder(order));
+
+            if (listed)
+            {
+                var cancel = Task.Run(() => brokerage.CancelOrder(order));
+                Assert.IsTrue(cancelRequested.Wait(TimeSpan.FromSeconds(10)), "The order was never canceled");
+                InvokeCheckForFills(brokerage);
+                polledDuringTheCancel.Set();
+                Assert.IsTrue(cancel.Wait(TimeSpan.FromSeconds(10)));
+                Assert.AreEqual(cancelAccepted, cancel.Result);
+            }
+            else
+            {
+                // the closing part is missing from the orders list, so it's fetched on its own
+                InvokeCheckForFills(brokerage);
+                Assert.AreEqual(cancelAccepted, brokerage.CancelOrder(order));
+                WaitForTheFetchesToEnd(brokerage);
+            }
+            CollectionAssert.AreEqual(new[] { OrderStatus.Submitted }, orderEvents.Select(x => x.Status));
+
+            // the next poll sees it again, once Tradier answered the cancel
+            InvokeCheckForFills(brokerage);
+            WaitForTheFetchesToEnd(brokerage);
+
+            // the opening part would be placed in the background: give it the time to show up
+            Thread.Sleep(500);
+            restClient.Verify(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.POST)), cancelAccepted ? Times.Once() : Times.Exactly(2));
+            CollectionAssert.AreEqual(cancelAccepted
+                ? new[] { OrderStatus.Submitted, OrderStatus.PartiallyFilled, OrderStatus.Canceled }
+                : new[] { OrderStatus.Submitted, OrderStatus.PartiallyFilled },
+                orderEvents.Select(x => x.Status));
+            Assert.AreEqual(-5m, orderEvents.Sum(x => x.FillQuantity));
+        }
+
+        // Tradier answering a cancel can take several attempts, the fill polling keeps reporting the other orders meanwhile
+        [Test]
+        public void ReportsTheFillOfAnotherOrderWhileACancelIsRetried()
+        {
+            const long otherOrderId = 1002;
+            var firstCancelAttemptFailed = new ManualResetEventSlim(false);
+            var cancelAttempts = 0;
+            var otherOrder = CreateBrokerageSideOrder(TradierOrderStatus.Open);
+            otherOrder.Id = otherOrderId;
+            var filledOtherOrder = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m);
+            filledOtherOrder.Id = otherOrderId;
+
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    var response = Interlocked.Increment(ref cancelAttempts) == 1
+                        ? CreateResponse("Service Unavailable", HttpStatusCode.ServiceUnavailable)
+                        : CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}");
+                    response.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                    if (cancelAttempts == 1)
+                    {
+                        firstCancelAttemptFailed.Set();
+                    }
+                    return response;
+                });
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse(SerializeOrders(CreateBrokerageSideOrder(TradierOrderStatus.Open), filledOtherOrder)));
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            var orderProvider = GetPrivateField<IOrderProvider>(typeof(TradierBrokerage), brokerage, "_orderProvider") as OrderProvider;
+            var otherLeanOrder = new MarketOrder(Symbols.AAPL, 10m, DateTime.UtcNow);
+            otherLeanOrder.BrokerId.Add(otherOrderId.ToStringInvariant());
+            orderProvider.Add(otherLeanOrder);
+            InvokePrivate(brokerage, "UpdateCachedOpenOrder", otherOrderId, otherOrder);
+
+            var cancel = Task.Run(() => brokerage.CancelOrder(order));
+            Assert.IsTrue(firstCancelAttemptFailed.Wait(TimeSpan.FromSeconds(10)), "The order was never canceled");
+
+            // the cancel waits 3 s before its next attempt
+            InvokeCheckForFills(brokerage);
+            Assert.IsFalse(cancel.IsCompleted);
+            Assert.AreEqual(1, orderEvents.Count);
+            Assert.AreEqual(OrderStatus.Filled, orderEvents[0].Status);
+            Assert.AreEqual(otherLeanOrder.Id, orderEvents[0].OrderId);
+            Assert.AreEqual(10m, orderEvents[0].FillQuantity);
+
+            Assert.IsTrue(cancel.Wait(TimeSpan.FromSeconds(10)));
+            Assert.IsTrue(cancel.Result);
+            Assert.AreEqual(2, cancelAttempts);
+            Assert.AreEqual(1, orderEvents.Count);
+        }
+
+        // The orders list can show an order as it was before what its own fetch reported: that can't take back executed quantity
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ReportsWhatAnOrderExecutedOnceWhenTheOrdersListLagsBehindItsFetch(bool cancel)
+        {
+            var listedOrders = new Queue<string>(["{\"orders\":\"null\"}",
+                SerializeOrders(CreateBrokerageSideOrder(TradierOrderStatus.Open)),
+                SerializeOrders(CreateBrokerageSideOrder(TradierOrderStatus.Canceled, 4m))]);
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns(() => CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse(listedOrders.Dequeue()));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith($"/orders/{BrokerageSideOrderId}") && r.Method == Method.GET)))
+                .Returns(() => CreateResponse($"{{\"order\":{JsonConvert.SerializeObject(CreateBrokerageSideOrder(TradierOrderStatus.PartiallyFilled, 4m))}}}"));
+
+            var (brokerage, order, orderEvents) = CreateBrokerageWithCachedOpenOrder(restClient.Object);
+            if (cancel)
+            {
+                Assert.IsTrue(brokerage.CancelOrder(order));
+            }
+
+            InvokeCheckForFills(brokerage);
+            WaitForTheFetchesToEnd(brokerage);
+            InvokeCheckForFills(brokerage);
+            InvokeCheckForFills(brokerage);
+
+            CollectionAssert.AreEqual(new[] { OrderStatus.PartiallyFilled, OrderStatus.Canceled }, orderEvents.Select(x => x.Status));
+            Assert.AreEqual(4m, orderEvents.Sum(x => x.FillQuantity));
+            Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));
+        }
+
+        // The orders list misses the order, and its own fetch answers with the given order while the cancel request is in
+        // flight, before Tradier answers the cancel with the given response
+        private static void SetUpAFetchAnsweringDuringTheCancelRequest(Mock<IRestClient> restClient, TradierOrder fetchedOrder,
+            IRestResponse cancelResponse)
+        {
+            var cancelRequested = new ManualResetEventSlim(false);
+            var fetchAnswered = new ManualResetEventSlim(false);
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                .Returns<IRestRequest>(request =>
+                {
+                    cancelRequested.Set();
+                    Assert.IsTrue(fetchAnswered.Wait(TimeSpan.FromSeconds(10)), "The order was never fetched");
+                    // let the fetch get to processing its answer
+                    Thread.Sleep(200);
+                    cancelResponse.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                    return cancelResponse;
+                });
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                .Returns(() => CreateResponse("{\"orders\":\"null\"}"));
+            restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Resource.EndsWith($"/orders/{BrokerageSideOrderId}") && r.Method == Method.GET)))
+                .Returns(() =>
+                {
+                    Assert.IsTrue(cancelRequested.Wait(TimeSpan.FromSeconds(10)), "The order was never canceled");
+                    var response = CreateResponse($"{{\"order\":{JsonConvert.SerializeObject(fetchedOrder)}}}");
+                    fetchAnswered.Set();
+                    return response;
+                });
         }
 
         // the orders container is only meant to be deserialized, its converter doesn't write, so wrap the orders by hand
@@ -865,6 +1523,32 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             cachedOpenOrders.SetValue(brokerage, Activator.CreateInstance(cachedOpenOrders.FieldType));
 
             return brokerage;
+        }
+
+        // A Lean order with an open Tradier order the fill polling tracks, which hasn't executed anything yet
+        private static (TradierBrokerage, Order, List<OrderEvent>) CreateBrokerageWithCachedOpenOrder(IRestClient restClient)
+        {
+            var orderProvider = new OrderProvider();
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient);
+            var order = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            order.BrokerId.Add(BrokerageSideOrderId.ToStringInvariant());
+            orderProvider.Add(order);
+            InvokePrivate(brokerage, "UpdateCachedOpenOrder", BrokerageSideOrderId, CreateBrokerageSideOrder(TradierOrderStatus.Open));
+
+            List<OrderEvent> orderEvents = [];
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+            return (brokerage, order, orderEvents);
+        }
+
+        // An order fetched on its own is done once it left the reentrance guard
+        private static void WaitForTheFetchesToEnd(TradierBrokerage brokerage)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (GetPrivateField<ICollection<long>>(typeof(TradierBrokerage), brokerage, "_reentranceGuardByTradierOrderID").Count > 0)
+            {
+                Assert.Less(DateTime.UtcNow, deadline, "The fetch never ended");
+                Thread.Sleep(50);
+            }
         }
 
         private static IDictionary GetCachedOpenOrders(TradierBrokerage brokerage)
