@@ -114,8 +114,6 @@ namespace QuantConnect.Brokerages.Tradier
         private readonly HashSet<long> _contingentReentranceGuardByQCOrderID = new HashSet<long>();
 
         private readonly UnknownOrderIds _unknownTradierOrderIDs = new();
-        // the last orders request failed, its next success reports the brokerage as reconnected
-        private volatile bool _ordersRequestFailed;
         // placements whose Tradier id isn't cached yet, the unknown order verification waits for them
         private int _pendingOrderPlacements;
         private readonly FixedSizeHashQueue<long> _verifiedUnknownTradierOrderIDs = new FixedSizeHashQueue<long>(1000);
@@ -457,15 +455,11 @@ namespace QuantConnect.Brokerages.Tradier
             orders = [];
             if (ordersContainer == null)
             {
-                _ordersRequestFailed = true;
                 return false;
             }
 
-            if (_ordersRequestFailed)
-            {
-                _ordersRequestFailed = false;
-                OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
-            }
+            // Lean only passes this on after a disconnection
+            OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
 
             if (ordersContainer.Orders == null)
             {
