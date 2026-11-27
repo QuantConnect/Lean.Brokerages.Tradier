@@ -102,6 +102,11 @@ namespace QuantConnect.Brokerages.Tradier
         private readonly CancellationTokenSource _cancellationTokenSource = new();
 
         private readonly object _fillLock = new object();
+
+        // the connection messages, sent in order and off the thread that reports them
+        private readonly object _connectionMessagesLock = new();
+        private Task _connectionMessages = Task.CompletedTask;
+        private BrokerageMessageType _lastConnectionMessageType = BrokerageMessageType.Reconnect;
         private readonly DateTime _initializationDateTime = DateTime.Now;
         private ConcurrentDictionary<long, TradierCachedOpenOrder> _cachedOpenOrdersByTradierOrderID;
 
@@ -444,7 +449,7 @@ namespace QuantConnect.Brokerages.Tradier
         /// </summary>
         /// <param name="orders">The orders, empty if there are none or the request failed</param>
         /// <param name="failureMessageType">The type of the message reporting that Tradier is still unavailable after the retries.
-        /// Only the fill poll reports a disconnection, which lets Lean wait out a Tradier outage, and the reconnection once it reads the orders again</param>
+        /// Only the fill poll reports a disconnection, which lets Lean wait out a Tradier outage, and the reconnection once it processes them again</param>
         /// <returns>False if the request failed, the failure was already reported</returns>
         private bool TryGetIntradayAndPendingOrders(out List<TradierOrder> orders, BrokerageMessageType failureMessageType)
         {
@@ -1114,6 +1119,21 @@ Interval	Data Available (Open)	Data Available (All)
         /// <param name="e">The error</param>
         protected override void OnMessage(BrokerageMessageEvent e)
         {
+            if (e.Type is BrokerageMessageType.Disconnect or BrokerageMessageType.Reconnect)
+            {
+                // the fill poll would wait for the subscribers, e.g. an algorithm placing an order on reconnection,
+                // whose fill only the next poll can report
+                lock (_connectionMessagesLock)
+                {
+                    if (e.Type != _lastConnectionMessageType)
+                    {
+                        _lastConnectionMessageType = e.Type;
+                        _connectionMessages = _connectionMessages.ContinueWith(_ => base.OnMessage(e), TaskScheduler.Default);
+                    }
+                }
+                return;
+            }
+
             var message = e;
             if (Exchange.DateTimeIsOpen(DateTime.Now) && ErrorsDuringMarketHours.Contains(e.Code))
             {
@@ -1270,14 +1290,12 @@ Interval	Data Available (Open)	Data Available (All)
                 return;
             }
 
-            var ordersRead = false;
             try
             {
                 if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders, BrokerageMessageType.Disconnect))
                 {
                     return;
                 }
-                ordersRead = true;
 
                 var updatedOrders = intradayAndPendingOrders.ToDictionary(x => x.Id);
 
@@ -1453,6 +1471,9 @@ Interval	Data Available (Open)	Data Available (All)
                         }
                     });
                 }
+
+                // after the fills, which the algorithm's reconnection handler has to see
+                OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
             }
             catch (Exception err)
             {
@@ -1461,10 +1482,6 @@ Interval	Data Available (Open)	Data Available (All)
             }
             finally
             {
-                if (ordersRead)
-                {
-                    OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
-                }
                 Monitor.Exit(_fillLock);
             }
         }

@@ -392,6 +392,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.OrdersStatusChanged += (_, statusEvents) => events.AddRange(statusEvents.Select(x => (object)x.Status));
 
             InvokeCheckForFills(brokerage);
+            WaitForConnectionMessages(brokerage);
 
             var disconnect = messages.Single();
             Assert.AreEqual(BrokerageMessageType.Disconnect, disconnect.Type);
@@ -402,6 +403,7 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             tradierAvailable = true;
             InvokeCheckForFills(brokerage);
             InvokeCheckForFills(brokerage);
+            WaitForConnectionMessages(brokerage);
 
             Assert.AreEqual(2, messages.Count);
             Assert.AreEqual(BrokerageMessageType.Reconnect, messages[1].Type);
@@ -409,6 +411,95 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.AreEqual(OrderStatus.Filled, fill.Status);
             Assert.AreEqual(10m, fill.FillQuantity);
             CollectionAssert.AreEqual(new object[] { BrokerageMessageType.Disconnect, OrderStatus.Filled, BrokerageMessageType.Reconnect }, events);
+        }
+
+        // Lean runs the algorithm's OnBrokerageReconnect on the thread that reports the reconnection. A market order it places
+        // waits for its fill, which only the next fill poll can report, so the poll must not wait for it
+        [Test]
+        public void ReportsTheFillOfAnOrderPlacedOnReconnection()
+        {
+            const long reconnectionOrderId = BrokerageSideOrderId + 1;
+            var reconnectionOrder = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m);
+            reconnectionOrder.Id = reconnectionOrderId;
+            var tradierAvailable = false;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => tradierAvailable
+                ? CreateResponse(SerializeOrders(reconnectionOrder))
+                : CreateResponse(ServiceUnavailablePage, HttpStatusCode.ServiceUnavailable));
+
+            var orderProvider = new OrderProvider();
+            var order = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            order.BrokerId.Add(reconnectionOrderId.ToStringInvariant());
+            orderProvider.Add(order);
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
+
+            var filled = new ManualResetEventSlim();
+            brokerage.OrdersStatusChanged += (_, events) =>
+            {
+                if (events.Any(x => x.Status == OrderStatus.Filled))
+                {
+                    filled.Set();
+                }
+            };
+            var reconnecting = new ManualResetEventSlim();
+            var filledOnReconnection = false;
+            brokerage.Message += (_, e) =>
+            {
+                if (e.Type == BrokerageMessageType.Reconnect)
+                {
+                    // the order is placed: the next poll reports its fill
+                    InvokePrivate(brokerage, "UpdateCachedOpenOrder", reconnectionOrderId, CreateBrokerageSideOrder(TradierOrderStatus.Open));
+                    reconnecting.Set();
+                    filledOnReconnection = filled.Wait(TimeSpan.FromSeconds(10));
+                }
+            };
+
+            InvokeCheckForFills(brokerage);
+            tradierAvailable = true;
+            InvokeCheckForFills(brokerage);
+
+            Assert.IsTrue(reconnecting.Wait(TimeSpan.FromSeconds(10)));
+            InvokeCheckForFills(brokerage);
+            WaitForConnectionMessages(brokerage);
+
+            Assert.IsTrue(filledOnReconnection);
+        }
+
+        // The reconnection lets the algorithm act on its holdings, so it waits until a poll processed the orders Tradier returned
+        [Test]
+        public void ReportsTheReconnectionOnceThePollProcessedTheOrders()
+        {
+            var tradierAvailable = false;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => tradierAvailable
+                ? CreateResponse(SerializeOrders(CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 10m)))
+                : CreateResponse(ServiceUnavailablePage, HttpStatusCode.ServiceUnavailable));
+
+            var order = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            order.BrokerId.Add(BrokerageSideOrderId.ToStringInvariant());
+            var orderProvider = new Mock<IOrderProvider>();
+            orderProvider.SetupSequence(x => x.GetOrdersByBrokerageId(BrokerageSideOrderId.ToStringInvariant()))
+                .Throws(new Exception("Processing failed"))
+                .Returns([order]);
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider.Object, restClient.Object);
+            InvokePrivate(brokerage, "UpdateCachedOpenOrder", BrokerageSideOrderId, CreateBrokerageSideOrder(TradierOrderStatus.Open));
+
+            List<object> events = [];
+            brokerage.Message += (_, e) => events.Add(e.Type == BrokerageMessageType.Disconnect || e.Type == BrokerageMessageType.Reconnect ? e.Type : e.Code);
+            brokerage.OrdersStatusChanged += (_, statusEvents) => events.AddRange(statusEvents.Select(x => (object)x.Status));
+
+            InvokeCheckForFills(brokerage);
+            WaitForConnectionMessages(brokerage);
+            tradierAvailable = true;
+            InvokeCheckForFills(brokerage);
+            WaitForConnectionMessages(brokerage);
+
+            CollectionAssert.AreEqual(new object[] { BrokerageMessageType.Disconnect, "CheckForFillsError" }, events);
+
+            InvokeCheckForFills(brokerage);
+            WaitForConnectionMessages(brokerage);
+
+            CollectionAssert.AreEqual(new object[] { BrokerageMessageType.Disconnect, "CheckForFillsError", OrderStatus.Filled, BrokerageMessageType.Reconnect }, events);
         }
 
         // Only the fill poll, which runs one at a time, reports the connection state. A background read of the orders that
@@ -1094,6 +1185,12 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         private static void InvokeCheckForFills(TradierBrokerage brokerage)
         {
             InvokePrivate(brokerage, "CheckForFills");
+        }
+
+        // the subscribers get the connection messages in the background
+        private static void WaitForConnectionMessages(TradierBrokerage brokerage)
+        {
+            Assert.IsTrue(GetPrivateField<Task>(typeof(TradierBrokerage), brokerage, "_connectionMessages").Wait(TimeSpan.FromSeconds(10)));
         }
 
         private static object InvokePrivate(TradierBrokerage brokerage, string name, params object[] args)
