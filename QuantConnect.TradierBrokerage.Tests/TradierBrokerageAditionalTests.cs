@@ -502,6 +502,75 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             CollectionAssert.AreEqual(new object[] { BrokerageMessageType.Disconnect, "CheckForFillsError", OrderStatus.Filled, BrokerageMessageType.Reconnect }, events);
         }
 
+        // A disposed brokerage no longer reports its connection state, even when an earlier subscriber is still running
+        [Test]
+        public void DropsTheConnectionMessagesNotYetDeliveredOnDisposal()
+        {
+            var brokerage = CreateBrokerageWithRestClient(new Mock<IRestClient>().Object, []);
+            var disconnecting = new ManualResetEventSlim();
+            var release = new ManualResetEventSlim();
+            var reconnected = new ManualResetEventSlim();
+            brokerage.Message += (_, e) =>
+            {
+                if (e.Type == BrokerageMessageType.Disconnect)
+                {
+                    disconnecting.Set();
+                    release.Wait(TimeSpan.FromSeconds(10));
+                }
+                else if (e.Type == BrokerageMessageType.Reconnect)
+                {
+                    reconnected.Set();
+                }
+            };
+
+            var onMessage = typeof(TradierBrokerage).GetMethod("OnMessage", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly,
+                [typeof(BrokerageMessageEvent)]);
+            onMessage.Invoke(brokerage, [new BrokerageMessageEvent(BrokerageMessageType.Disconnect, "ServiceUnavailable", "Tradier is unavailable")]);
+            onMessage.Invoke(brokerage, [BrokerageMessageEvent.Reconnected("Tradier's API is available again.")]);
+            Assert.IsTrue(disconnecting.Wait(TimeSpan.FromSeconds(10)));
+
+            Assert.IsTrue(Task.Run(brokerage.Dispose).Wait(TimeSpan.FromSeconds(5)));
+            release.Set();
+
+            Assert.IsFalse(reconnected.Wait(TimeSpan.FromSeconds(1)));
+        }
+
+        // Several executions between two polls, such as during an outage, are reported at their average price
+        [TestCase(0, 0, 10, 110, 110, 10, 110)]
+        [TestCase(0, 0, 10, 105, 110, 5, 105)]
+        [TestCase(4, 100, 10, 105, 110, 2, 650 / 6.0)]
+        [TestCase(4, 100, 10, 0, 110, 2, 110)]
+        [TestCase(4, 0, 10, 105, 110, 2, 110)]
+        public void ReportsTheAveragePriceOfTheExecutionsSinceTheLastPoll(decimal cachedQuantityExecuted, decimal cachedAveragePrice,
+            decimal quantityExecuted, decimal averagePrice, decimal lastFillPrice, decimal lastFillQuantity, double expectedFillPrice)
+        {
+            var updatedOrder = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted);
+            updatedOrder.AverageFillPrice = averagePrice;
+            updatedOrder.LastFillPrice = lastFillPrice;
+            updatedOrder.LastFillQuantity = lastFillQuantity;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => CreateResponse(SerializeOrders(updatedOrder)));
+
+            var orderProvider = new OrderProvider();
+            var order = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
+            order.BrokerId.Add(BrokerageSideOrderId.ToStringInvariant());
+            orderProvider.Add(order);
+            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
+            var cachedOrder = CreateBrokerageSideOrder(cachedQuantityExecuted > 0 ? TradierOrderStatus.PartiallyFilled : TradierOrderStatus.Open, cachedQuantityExecuted);
+            cachedOrder.AverageFillPrice = cachedAveragePrice;
+            InvokePrivate(brokerage, "UpdateCachedOpenOrder", BrokerageSideOrderId, cachedOrder);
+
+            List<OrderEvent> orderEvents = [];
+            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
+
+            InvokeCheckForFills(brokerage);
+
+            var fill = orderEvents.Single();
+            Assert.AreEqual(OrderStatus.Filled, fill.Status);
+            Assert.AreEqual(quantityExecuted - cachedQuantityExecuted, fill.FillQuantity);
+            Assert.AreEqual(expectedFillPrice, (double)fill.FillPrice, 1e-9);
+        }
+
         // Only the fill poll, which runs one at a time, reports the connection state. A background read of the orders that
         // failed while the poll succeeded used to report a disconnection after the poll's reconnection, which Lean then
         // waited on until it stopped the algorithm, although Tradier was available

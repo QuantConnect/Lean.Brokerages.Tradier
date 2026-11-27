@@ -1107,6 +1107,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// </summary>
         public override void Dispose()
         {
+            _cancellationTokenSource.Cancel();
             _subscribeThead.StopSafely(TimeSpan.FromSeconds(5), _cancellationTokenSource);
             _orderFillTimer.DisposeSafely();
         }
@@ -1116,7 +1117,8 @@ Interval	Data Available (Open)	Data Available (All)
         /// </summary>
         /// <param name="e">The error</param>
         /// <remarks>Disconnect and Reconnect reach the subscribers in order, on a background task and only when the state changes:
-        /// the fill poll reports them, and a subscriber such as an algorithm placing an order on reconnection waits for the next poll</remarks>
+        /// the fill poll reports them, and a subscriber such as an algorithm placing an order on reconnection waits for the next poll.
+        /// Those not yet delivered are dropped on disposal</remarks>
         protected override void OnMessage(BrokerageMessageEvent e)
         {
             if (e.Type is BrokerageMessageType.Disconnect or BrokerageMessageType.Reconnect)
@@ -1126,7 +1128,8 @@ Interval	Data Available (Open)	Data Available (All)
                     if (e.Type != _lastConnectionMessageType)
                     {
                         _lastConnectionMessageType = e.Type;
-                        _connectionMessages = _connectionMessages.ContinueWith(_ => base.OnMessage(e), TaskScheduler.Default);
+                        _connectionMessages = _connectionMessages.ContinueWith(_ => base.OnMessage(e), _cancellationTokenSource.Token,
+                            TaskContinuationOptions.None, TaskScheduler.Default);
                     }
                 }
                 return;
@@ -1609,16 +1612,21 @@ Interval	Data Available (Open)	Data Available (All)
                     throw new Exception($"Lean order not found for brokerage id: {updatedOrder.Id}");
                 }
 
+                var fillQuantity = updatedOrder.QuantityExecuted - cachedOrder.Order.QuantityExecuted;
+                var fillPrice = updatedOrder.LastFillPrice;
+                if (fillQuantity > updatedOrder.LastFillQuantity && updatedOrder.AverageFillPrice > 0
+                    && (cachedOrder.Order.QuantityExecuted == 0 || cachedOrder.Order.AverageFillPrice > 0))
+                {
+                    fillPrice = (updatedOrder.AverageFillPrice * updatedOrder.QuantityExecuted
+                        - cachedOrder.Order.AverageFillPrice * cachedOrder.Order.QuantityExecuted) / fillQuantity;
+                }
+
                 var orderFee = OrderFee.Zero;
                 var fill = new OrderEvent(qcOrder, DateTime.UtcNow, orderFee, "Tradier Fill Event")
                 {
                     Status = leanOrderStatus,
-                    // this is guaranteed to be wrong in the event we have multiple fills within our polling interval,
-                    // we're able to partially cope with the fill quantity by diffing the previous info vs current info
-                    // but the fill price will always be the most recent fill, so if we have two fills with 1/10 of a second
-                    // we'll get the latter fill price, so for large orders this can lead to inconsistent state
-                    FillPrice = updatedOrder.LastFillPrice,
-                    FillQuantity = (int)(updatedOrder.QuantityExecuted - cachedOrder.Order.QuantityExecuted)
+                    FillPrice = fillPrice,
+                    FillQuantity = (int)fillQuantity
                 };
 
                 if (!string.IsNullOrEmpty(updatedOrder.ReasonDescription))
