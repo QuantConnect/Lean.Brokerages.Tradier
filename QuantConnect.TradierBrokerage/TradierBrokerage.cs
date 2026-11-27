@@ -118,8 +118,6 @@ namespace QuantConnect.Brokerages.Tradier
         private int _pendingOrderPlacements;
         private readonly FixedSizeHashQueue<long> _verifiedUnknownTradierOrderIDs = new FixedSizeHashQueue<long>(1000);
         private readonly FixedSizeHashQueue<int> _cancelledQcOrderIDs = new FixedSizeHashQueue<int>(10000);
-        // lean orders whose cancellation Tradier accepted
-        private readonly FixedSizeHashQueue<int> _cancelAcceptedQcOrderIDs = new FixedSizeHashQueue<int>(10000);
         private string _restApiUrl = "https://api.tradier.com/v1/";
         private string _restApiSandboxUrl = "https://sandbox.tradier.com/v1/";
 
@@ -906,24 +904,21 @@ Interval	Data Available (Open)	Data Available (All)
                 return false;
             }
 
-            // before doing anything, verify only one outstanding order per symbol. An order whose cancellation is pending stays
-            // cached until the fill polling sees it canceled, so look past it at every cached order of the symbol. Tradier
-            // lists an option order under its underlying's ticker, so only the orders of this very security are replaced
-            var cachedOpenOrders = _cachedOpenOrdersByTradierOrderID.Where(x => x.Value.Order.Symbol == order.Symbol.Value).ToList();
-            var canceledQcOrderIds = new HashSet<int>();
-            foreach (var cachedOpenOrder in cachedOpenOrders)
+            // before doing anything, verify only one outstanding order per symbol
+            var orderClass = ConvertSecurityType(order.SecurityType);
+            var cachedOpenOrder = _cachedOpenOrdersByTradierOrderID.Values.FirstOrDefault(x => x.IsActiveFor(orderClass, order.Symbol.Value));
+            if (cachedOpenOrder != null)
             {
-                var qcOrder = _orderProvider.GetOrdersByBrokerageId(cachedOpenOrder.Key)?.SingleOrDefault();
+                var qcOrder = _orderProvider.GetOrdersByBrokerageId(cachedOpenOrder.Order.Id)?.SingleOrDefault();
                 if (qcOrder == null)
                 {
                     // clean up our mess, this should never be encountered.
+                    TradierCachedOpenOrder tradierOrder;
                     Log.Error("TradierBrokerage.PlaceOrder(): Unable to locate existing QC Order when verifying single outstanding order per symbol.");
-                    _cachedOpenOrdersByTradierOrderID.TryRemove(cachedOpenOrder.Key, out _);
+                    _cachedOpenOrdersByTradierOrderID.TryRemove(cachedOpenOrder.Order.Id, out tradierOrder);
                 }
-                // if the qc order is still listed as open, then we have an issue, attempt to cancel it before placing this new order,
-                // unless its cancellation is already pending or was accepted by Tradier
-                else if (qcOrder.Symbol == order.Symbol && qcOrder.Status.IsOpen() && qcOrder.Status != OrderStatus.CancelPending
-                    && !_cancelAcceptedQcOrderIDs.Contains(qcOrder.Id) && canceledQcOrderIds.Add(qcOrder.Id))
+                // if the qc order is still listed as open, then we have an issue, attempt to cancel it before placing this new order
+                else if (qcOrder.Status.IsOpen())
                 {
                     // let the world know what we're doing
                     OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Warning, "OneOrderPerSymbol",
@@ -1071,15 +1066,16 @@ Interval	Data Available (Open)	Data Available (All)
                     }
                     return false;
                 }
-                // Tradier only accepted the request: the order stays cached so the fill polling reports what it executed
-                // before Tradier canceled it, and then the cancellation itself
                 cancelRequested = true;
+                // Tradier only accepted the request, the order isn't canceled yet. It stays cached, so the fill polling
+                // reports what it executes in the meantime, and then its cancellation
+                if (response.Errors.Errors.IsNullOrEmpty() && response.Order.Status == "ok"
+                    && _cachedOpenOrdersByTradierOrderID.TryGetValue(id, out var tradierOrder))
+                {
+                    tradierOrder.CancelPending = true;
+                }
             }
 
-            if (cancelRequested)
-            {
-                _cancelAcceptedQcOrderIDs.Add(order.Id);
-            }
             return cancelRequested;
         }
 
@@ -1311,21 +1307,8 @@ Interval	Data Available (Open)	Data Available (All)
                                 throw new InvalidOperationException("TradierBrokerage.CheckForFills(): GetOrder() return null response");
                             }
 
-                            // the fill polling may have processed the order while we fetched it: diff against what's cached now,
-                            // under its lock, so the same execution isn't reported by both
-                            lock (_fillLock)
-                            {
-                                if (!_cachedOpenOrdersByTradierOrderID.TryGetValue(cachedOrderLocal.Key, out var currentCachedOrder)
-                                    // a response older than what the polling cached has nothing new
-                                    || updatedOrderLocal.QuantityExecuted < currentCachedOrder.Order.QuantityExecuted)
-                                {
-                                    return;
-                                }
-
-                                // diff before caching: the cached entry is the instance we compare against
-                                ProcessPotentiallyUpdatedOrder(currentCachedOrder, updatedOrderLocal);
-                                if (!OrderIsClosed(updatedOrderLocal)) UpdateCachedOpenOrder(cachedOrderLocal.Key, updatedOrderLocal);
-                            }
+                            UpdateCachedOpenOrder(cachedOrderLocal.Key, updatedOrderLocal);
+                            ProcessPotentiallyUpdatedOrder(cachedOrderLocal.Value, updatedOrderLocal);
                         }
                         catch (Exception err)
                         {
@@ -1566,19 +1549,89 @@ Interval	Data Available (Open)	Data Available (All)
 
         private void ProcessPotentiallyUpdatedOrder(TradierCachedOpenOrder cachedOrder, TradierOrder updatedOrder)
         {
+            // Lean only applies fills carried by a fill status, so an order that closed without filling, such as a canceled
+            // or expired one, reports what it executed since the last poll as a partial fill before its final status
+            if (OrderIsClosed(updatedOrder) && updatedOrder.Status != TradierOrderStatus.Filled
+                && updatedOrder.QuantityExecuted > cachedOrder.Order.QuantityExecuted)
+            {
+                var partiallyFilledOrder = new TradierOrder
+                {
+                    Id = updatedOrder.Id,
+                    Direction = updatedOrder.Direction,
+                    Status = TradierOrderStatus.PartiallyFilled,
+                    QuantityExecuted = updatedOrder.QuantityExecuted,
+                    RemainingQuantity = updatedOrder.RemainingQuantity,
+                    LastFillPrice = updatedOrder.LastFillPrice
+                };
+                ProcessPotentiallyUpdatedOrder(cachedOrder, partiallyFilledOrder);
+                cachedOrder.Order = partiallyFilledOrder;
+            }
+
             // check for fills or status changes, for either fire a fill event
             if (updatedOrder.RemainingQuantity != cachedOrder.Order.RemainingQuantity
-             || ConvertStatus(updatedOrder.Status) != ConvertStatus(cachedOrder.Order.Status))
+             || ConvertStatus(updatedOrder.Status) != ConvertStatus(cachedOrder.Order.Status)
+             // an order fetched on its own is cached before this diff, so it shows no change: an order with a
+             // pending cancel still has to report how it closed
+             || cachedOrder.CancelPending && OrderIsClosed(updatedOrder))
             {
-                var fillQuantity = (int)(updatedOrder.QuantityExecuted - cachedOrder.Order.QuantityExecuted);
-                // Lean only applies fills carried by a fill status, so an order that closed without filling, such as a
-                // canceled or expired one, reports what it executed since the last poll before its final status
-                if (fillQuantity != 0 && OrderIsClosed(updatedOrder) && updatedOrder.Status != TradierOrderStatus.Filled)
+                var leanOrderStatus = ConvertStatus(updatedOrder.Status);
+                // get original QC order by brokerage id
+                if (!TryGetOrRemoveCrossZeroOrder(updatedOrder.Id.ToStringInvariant(), leanOrderStatus, out var qcOrder))
                 {
-                    EmitOrderEvent(cachedOrder, updatedOrder, OrderStatus.PartiallyFilled, fillQuantity);
-                    fillQuantity = 0;
+                    qcOrder = _orderProvider.GetOrdersByBrokerageId(updatedOrder.Id)?.SingleOrDefault();
                 }
-                EmitOrderEvent(cachedOrder, updatedOrder, ConvertStatus(updatedOrder.Status), fillQuantity);
+
+                if (qcOrder == null)
+                {
+                    throw new Exception($"Lean order not found for brokerage id: {updatedOrder.Id}");
+                }
+
+                var orderFee = OrderFee.Zero;
+                var fill = new OrderEvent(qcOrder, DateTime.UtcNow, orderFee, "Tradier Fill Event")
+                {
+                    Status = leanOrderStatus,
+                    // this is guaranteed to be wrong in the event we have multiple fills within our polling interval,
+                    // we're able to partially cope with the fill quantity by diffing the previous info vs current info
+                    // but the fill price will always be the most recent fill, so if we have two fills with 1/10 of a second
+                    // we'll get the latter fill price, so for large orders this can lead to inconsistent state
+                    FillPrice = updatedOrder.LastFillPrice,
+                    FillQuantity = (int)(updatedOrder.QuantityExecuted - cachedOrder.Order.QuantityExecuted)
+                };
+
+                if (!string.IsNullOrEmpty(updatedOrder.ReasonDescription))
+                {
+                    fill.Message = updatedOrder.ReasonDescription;
+                }
+
+                // flip the quantity on sell actions
+                if (IsShort(updatedOrder.Direction))
+                {
+                    fill.FillQuantity *= -1;
+                }
+
+                if (!cachedOrder.EmittedOrderFee)
+                {
+                    cachedOrder.EmittedOrderFee = true;
+                    var security = _securityProvider.GetSecurity(qcOrder.Symbol);
+                    fill.OrderFee = security.FeeModel.GetOrderFee(
+                        new OrderFeeParameters(security, qcOrder));
+                }
+
+                // the closing part of an order crossing zero filled before Tradier canceled it: report the fill and then
+                // the cancellation, which drops the opening part instead of placing it
+                if (leanOrderStatus == OrderStatus.Filled && cachedOrder.CancelPending
+                    && TryGetUpdateCrossZeroOrderQuantity(qcOrder, out var placedQuantity) && placedQuantity != qcOrder.Quantity)
+                {
+                    fill.Status = OrderStatus.PartiallyFilled;
+                    OnOrderEvent(fill);
+                    fill = new OrderEvent(qcOrder, DateTime.UtcNow, OrderFee.Zero, "Tradier Order Event") { Status = OrderStatus.Canceled };
+                }
+
+                // if we filled the order and have another contingent order waiting, submit it
+                if (!TryHandleRemainingCrossZeroOrder(qcOrder, fill))
+                {
+                    OnOrderEvent(fill);
+                }
             }
 
             // remove from open orders since it's now closed
@@ -1586,70 +1639,6 @@ Interval	Data Available (Open)	Data Available (All)
             {
                 _filledTradierOrderIDs.Add(updatedOrder.Id);
                 _cachedOpenOrdersByTradierOrderID.TryRemove(updatedOrder.Id, out _);
-            }
-        }
-
-        private void EmitOrderEvent(TradierCachedOpenOrder cachedOrder, TradierOrder updatedOrder, OrderStatus leanOrderStatus, int fillQuantity)
-        {
-            // get original QC order by brokerage id
-            if (!TryGetOrRemoveCrossZeroOrder(updatedOrder.Id.ToStringInvariant(), leanOrderStatus, out var qcOrder))
-            {
-                qcOrder = _orderProvider.GetOrdersByBrokerageId(updatedOrder.Id)?.SingleOrDefault();
-            }
-
-            if (qcOrder == null)
-            {
-                throw new Exception($"Lean order not found for brokerage id: {updatedOrder.Id}");
-            }
-
-            var orderFee = OrderFee.Zero;
-            var fill = new OrderEvent(qcOrder, DateTime.UtcNow, orderFee, "Tradier Fill Event")
-            {
-                Status = leanOrderStatus,
-                // this is guaranteed to be wrong in the event we have multiple fills within our polling interval,
-                // we're able to partially cope with the fill quantity by diffing the previous info vs current info
-                // but the fill price will always be the most recent fill, so if we have two fills with 1/10 of a second
-                // we'll get the latter fill price, so for large orders this can lead to inconsistent state
-                FillPrice = updatedOrder.LastFillPrice,
-                FillQuantity = fillQuantity
-            };
-
-            if (!string.IsNullOrEmpty(updatedOrder.ReasonDescription))
-            {
-                fill.Message = updatedOrder.ReasonDescription;
-            }
-
-            // flip the quantity on sell actions
-            if (IsShort(updatedOrder.Direction))
-            {
-                fill.FillQuantity *= -1;
-            }
-
-            if (!cachedOrder.EmittedOrderFee)
-            {
-                cachedOrder.EmittedOrderFee = true;
-                var security = _securityProvider.GetSecurity(qcOrder.Symbol);
-                fill.OrderFee = security.FeeModel.GetOrderFee(
-                    new OrderFeeParameters(security, qcOrder));
-            }
-
-            // the closing part of an order crossing zero filled after Tradier accepted the order's cancel: report the fill
-            // and the cancel, which drops the opening part instead of placing it
-            if (leanOrderStatus == OrderStatus.Filled && _cancelAcceptedQcOrderIDs.Contains(qcOrder.Id)
-                && TryGetUpdateCrossZeroOrderQuantity(qcOrder, out var placedQuantity) && placedQuantity != qcOrder.Quantity)
-            {
-                fill.Status = OrderStatus.PartiallyFilled;
-                OnOrderEvent(fill);
-                var canceled = new OrderEvent(qcOrder, DateTime.UtcNow, OrderFee.Zero, "Tradier Order Event") { Status = OrderStatus.Canceled };
-                TryHandleRemainingCrossZeroOrder(qcOrder, canceled);
-                OnOrderEvent(canceled);
-                return;
-            }
-
-            // if we filled the order and have another contingent order waiting, submit it
-            if (!TryHandleRemainingCrossZeroOrder(qcOrder, fill))
-            {
-                OnOrderEvent(fill);
             }
         }
 
@@ -2228,11 +2217,25 @@ Interval	Data Available (Open)	Data Available (All)
         private class TradierCachedOpenOrder
         {
             public bool EmittedOrderFee;
+            // the order waits for Tradier to confirm its cancellation, the fill polling reports when it's really closed
+            public bool CancelPending;
             public TradierOrder Order;
 
             public TradierCachedOpenOrder(TradierOrder order)
             {
                 Order = order;
+            }
+
+            /// <summary>
+            /// Whether this is the active order of the given security, the one a new order for that security has to
+            /// replace. Tradier lists an option order under its underlying's ticker, so the order class is part of the
+            /// match. An order waiting for Tradier to confirm its cancellation is not active any more: it stays cached
+            /// only until the fill polling sees it closed
+            /// </summary>
+            public bool IsActiveFor(TradierOrderClass orderClass, string ticker)
+            {
+                return !CancelPending && Order.Class == orderClass
+                    && string.Equals(Order.Symbol, ticker, StringComparison.OrdinalIgnoreCase);
             }
         }
 
