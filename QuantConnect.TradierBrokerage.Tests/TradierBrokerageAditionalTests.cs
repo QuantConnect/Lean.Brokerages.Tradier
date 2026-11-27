@@ -1284,10 +1284,13 @@ namespace QuantConnect.Tests.Brokerages.Tradier
         }
 
         // Whether the closing part of an order crossing zero that fills places the opening part depends on Tradier's answer
-        // to the cancel, so a fill the fetch sees while the cancel request is in flight waits for that answer
-        [TestCase(true)]
-        [TestCase(false)]
-        public void PlacesTheOpeningPartOfAnOrderCrossingZeroFilledDuringItsCancelOnlyIfTradierRefusedIt(bool cancelAccepted)
+        // to the cancel, so a fill the poll sees while the cancel request is in flight, in the orders list or through the
+        // order's own fetch, waits for that answer
+        [TestCase(true, false)]
+        [TestCase(false, false)]
+        [TestCase(true, true)]
+        [TestCase(false, true)]
+        public void PlacesTheOpeningPartOfAnOrderCrossingZeroFilledDuringItsCancelOnlyIfTradierRefusedIt(bool cancelAccepted, bool listed)
         {
             var filledClosingPart = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted: 5m);
             filledClosingPart.Quantity = 5m;
@@ -1300,7 +1303,25 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             var cancelResponse = cancelAccepted
                 ? CreateResponse($"{{\"order\":{{\"id\":{BrokerageSideOrderId},\"status\":\"ok\"}}}}")
                 : CreateResponse(FinalizedOrderResponse, HttpStatusCode.BadRequest);
-            SetUpAFetchAnsweringDuringTheCancelRequest(restClient, filledClosingPart, cancelResponse);
+            var cancelRequested = new ManualResetEventSlim(false);
+            var polledDuringTheCancel = new ManualResetEventSlim(false);
+            if (listed)
+            {
+                restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.DELETE)))
+                    .Returns<IRestRequest>(request =>
+                    {
+                        cancelRequested.Set();
+                        Assert.IsTrue(polledDuringTheCancel.Wait(TimeSpan.FromSeconds(10)), "The orders were never polled");
+                        cancelResponse.ResponseUri = new Uri($"https://api.tradier.com/v1/{request.Resource}");
+                        return cancelResponse;
+                    });
+                restClient.Setup(x => x.Execute(It.Is<IRestRequest>(r => r.Method == Method.GET && r.Resource.EndsWith("/orders"))))
+                    .Returns(() => CreateResponse(SerializeOrders(filledClosingPart)));
+            }
+            else
+            {
+                SetUpAFetchAnsweringDuringTheCancelRequest(restClient, filledClosingPart, cancelResponse);
+            }
 
             var orderProvider = new OrderProvider();
             var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
@@ -1312,13 +1333,25 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             orderProvider.Add(order);
             Assert.IsTrue(brokerage.PlaceOrder(order));
 
-            // the closing part is missing from the orders list, so it's fetched on its own
-            InvokeCheckForFills(brokerage);
-            Assert.AreEqual(cancelAccepted, brokerage.CancelOrder(order));
-            WaitForTheFetchesToEnd(brokerage);
+            if (listed)
+            {
+                var cancel = Task.Run(() => brokerage.CancelOrder(order));
+                Assert.IsTrue(cancelRequested.Wait(TimeSpan.FromSeconds(10)), "The order was never canceled");
+                InvokeCheckForFills(brokerage);
+                polledDuringTheCancel.Set();
+                Assert.IsTrue(cancel.Wait(TimeSpan.FromSeconds(10)));
+                Assert.AreEqual(cancelAccepted, cancel.Result);
+            }
+            else
+            {
+                // the closing part is missing from the orders list, so it's fetched on its own
+                InvokeCheckForFills(brokerage);
+                Assert.AreEqual(cancelAccepted, brokerage.CancelOrder(order));
+                WaitForTheFetchesToEnd(brokerage);
+            }
             CollectionAssert.AreEqual(new[] { OrderStatus.Submitted }, orderEvents.Select(x => x.Status));
 
-            // the next poll fetches it again, once Tradier answered the cancel
+            // the next poll sees it again, once Tradier answered the cancel
             InvokeCheckForFills(brokerage);
             WaitForTheFetchesToEnd(brokerage);
 
