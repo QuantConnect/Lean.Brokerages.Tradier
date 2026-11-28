@@ -102,6 +102,9 @@ namespace QuantConnect.Brokerages.Tradier
         private readonly CancellationTokenSource _cancellationTokenSource = new();
 
         private readonly object _fillLock = new object();
+        private readonly object _connectionMessagesLock = new();
+        private Task _connectionMessages = Task.CompletedTask;
+        private BrokerageMessageType _lastConnectionMessageType = BrokerageMessageType.Reconnect;
         private readonly DateTime _initializationDateTime = DateTime.Now;
         private ConcurrentDictionary<long, TradierCachedOpenOrder> _cachedOpenOrdersByTradierOrderID;
 
@@ -168,15 +171,18 @@ namespace QuantConnect.Brokerages.Tradier
         /// <summary>
         /// Execute a authenticated call:
         /// </summary>
-        private T Execute<T>(RestRequest request, TradierApiRequestType type, string rootName = "", int max = 10) where T : new()
+        private T Execute<T>(RestRequest request, TradierApiRequestType type, string rootName = "", int max = 10,
+            BrokerageMessageType failureMessageType = BrokerageMessageType.Error) where T : new()
         {
-            return Execute<T>(request, type, out _, rootName, max);
+            return Execute<T>(request, type, out _, rootName, max, failureMessageType);
         }
 
         /// <summary>
         /// Execute a authenticated call and hand back the raw body of the last response:
         /// </summary>
-        private T Execute<T>(RestRequest request, TradierApiRequestType type, out string rawContent, string rootName = "", int max = 10) where T : new()
+        /// <param name="failureMessageType">The type of the message reporting that Tradier is still unavailable (a 5xx or no response) after the retries, other failures report an error</param>
+        private T Execute<T>(RestRequest request, TradierApiRequestType type, out string rawContent, string rootName = "", int max = 10,
+            BrokerageMessageType failureMessageType = BrokerageMessageType.Error) where T : new()
         {
             var method = "TradierBrokerage.Execute." + request.Resource;
             var parameters = request.Parameters.Select(x => x.Name + ": " + x.Value);
@@ -272,7 +278,10 @@ namespace QuantConnect.Brokerages.Tradier
                         ? "Tradier's API is likely temporarily unavailable, please contact support if it persists."
                         : $"Response: {raw.Content}";
 
-                    OnMessage(new BrokerageMessageEvent(BrokerageMessageType.Error, raw.StatusCode.ToStringInvariant(),
+                    var tradierUnavailable = raw.StatusCode == 0 || (int)raw.StatusCode >= 500;
+                    var messageType = tradierUnavailable ? failureMessageType : BrokerageMessageType.Error;
+
+                    OnMessage(new BrokerageMessageEvent(messageType, raw.StatusCode.ToStringInvariant(),
                         $"Tradier returned {raw.StatusCode} for {request.Method} {request.Resource} and the request " +
                         $"still failed after {max} retries. {detail}"));
 
@@ -437,11 +446,13 @@ namespace QuantConnect.Brokerages.Tradier
         /// Get Intraday and pending orders for users account: accounts/{account_id}/orders
         /// </summary>
         /// <param name="orders">The orders, empty if there are none or the request failed</param>
+        /// <param name="failureMessageType">The type of the message reporting that Tradier is still unavailable after the retries.
+        /// Only the fill poll reports a disconnection, which lets Lean wait out a Tradier outage, and the reconnection once it processes them again</param>
         /// <returns>False if the request failed, the failure was already reported</returns>
-        private bool TryGetIntradayAndPendingOrders(out List<TradierOrder> orders)
+        private bool TryGetIntradayAndPendingOrders(out List<TradierOrder> orders, BrokerageMessageType failureMessageType)
         {
             var request = new RestRequest($"accounts/{_accountId}/orders");
-            var ordersContainer = Execute<TradierOrdersContainer>(request, TradierApiRequestType.Standard);
+            var ordersContainer = Execute<TradierOrdersContainer>(request, TradierApiRequestType.Standard, failureMessageType: failureMessageType);
 
             orders = [];
             if (ordersContainer == null)
@@ -819,7 +830,7 @@ Interval	Data Available (Open)	Data Available (All)
         public override List<Order> GetOpenOrders()
         {
             var orders = new List<Order>();
-            if (!TryGetIntradayAndPendingOrders(out var openOrders))
+            if (!TryGetIntradayAndPendingOrders(out var openOrders, BrokerageMessageType.Error))
             {
                 return orders;
             }
@@ -1096,6 +1107,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// </summary>
         public override void Dispose()
         {
+            _cancellationTokenSource.Cancel();
             _subscribeThead.StopSafely(TimeSpan.FromSeconds(5), _cancellationTokenSource);
             _orderFillTimer.DisposeSafely();
         }
@@ -1104,8 +1116,25 @@ Interval	Data Available (Open)	Data Available (All)
         /// Event invocator for the Message event
         /// </summary>
         /// <param name="e">The error</param>
+        /// <remarks>Disconnect and Reconnect reach the subscribers in order, on a background task and only when the state changes:
+        /// the fill poll of a brokerage that tracks orders reports them, and a subscriber such as an algorithm placing an order on reconnection waits for the next poll.
+        /// Those not yet delivered are dropped on disposal</remarks>
         protected override void OnMessage(BrokerageMessageEvent e)
         {
+            if (e.Type is BrokerageMessageType.Disconnect or BrokerageMessageType.Reconnect)
+            {
+                lock (_connectionMessagesLock)
+                {
+                    if (e.Type != _lastConnectionMessageType)
+                    {
+                        _lastConnectionMessageType = e.Type;
+                        _connectionMessages = _connectionMessages.ContinueWith(_ => base.OnMessage(e), _cancellationTokenSource.Token,
+                            TaskContinuationOptions.None, TaskScheduler.Default);
+                    }
+                }
+                return;
+            }
+
             var message = e;
             if (Exchange.DateTimeIsOpen(DateTime.Now) && ErrorsDuringMarketHours.Contains(e.Code))
             {
@@ -1225,7 +1254,7 @@ Interval	Data Available (Open)	Data Available (All)
                 {
                     Task.Run(() =>
                     {
-                        if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders))
+                        if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders, BrokerageMessageType.Warning))
                         {
                             return;
                         }
@@ -1264,7 +1293,8 @@ Interval	Data Available (Open)	Data Available (All)
 
             try
             {
-                if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders))
+                if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders,
+                    _orderProvider == null ? BrokerageMessageType.Error : BrokerageMessageType.Disconnect))
                 {
                     return;
                 }
@@ -1356,7 +1386,7 @@ Interval	Data Available (Open)	Data Available (All)
                             // so don't treat orders placed externally in the account as an error
                             if (_orderProvider != null && stillUnknownOrderIDs.Count > 0)
                             {
-                                if (!TryGetIntradayAndPendingOrders(out var intradayOrders))
+                                if (!TryGetIntradayAndPendingOrders(out var intradayOrders, BrokerageMessageType.Warning))
                                 {
                                     // leave these ids unverified so the next poll rechecks them
                                     return;
@@ -1443,6 +1473,8 @@ Interval	Data Available (Open)	Data Available (All)
                         }
                     });
                 }
+
+                OnMessage(BrokerageMessageEvent.Reconnected("Tradier's API is available again."));
             }
             catch (Exception err)
             {
