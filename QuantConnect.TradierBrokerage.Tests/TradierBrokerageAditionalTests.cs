@@ -502,6 +502,31 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             CollectionAssert.AreEqual(new object[] { BrokerageMessageType.Disconnect, "CheckForFillsError", OrderStatus.Filled, BrokerageMessageType.Reconnect }, events);
         }
 
+        // Lean sends the messages of the data queue handler and of the brokerage to the same handler, so a Tradier instance used
+        // only for data must not report a connection state that would cancel the shutdown of a disconnected execution brokerage
+        [Test]
+        public void DataQueueHandlerDoesNotReportTheConnectionState()
+        {
+            var tradierAvailable = false;
+            var restClient = new Mock<IRestClient>();
+            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => tradierAvailable
+                ? CreateResponse(SerializeOrders())
+                : CreateResponse(ServiceUnavailablePage, HttpStatusCode.ServiceUnavailable));
+            var brokerage = CreateBrokerageWithOrderTracking(null, restClient.Object);
+
+            List<BrokerageMessageEvent> messages = [];
+            brokerage.Message += (_, e) => messages.Add(e);
+
+            InvokeCheckForFills(brokerage);
+            tradierAvailable = true;
+            InvokeCheckForFills(brokerage);
+            WaitForConnectionMessages(brokerage);
+
+            var error = messages.Single();
+            Assert.AreEqual(BrokerageMessageType.Error, error.Type);
+            Assert.AreEqual("ServiceUnavailable", error.Code);
+        }
+
         // A disposed brokerage no longer reports its connection state, even when an earlier subscriber is still running
         [Test]
         public void DropsTheConnectionMessagesNotYetDeliveredOnDisposal()

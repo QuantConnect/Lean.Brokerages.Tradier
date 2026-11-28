@@ -1117,7 +1117,7 @@ Interval	Data Available (Open)	Data Available (All)
         /// </summary>
         /// <param name="e">The error</param>
         /// <remarks>Disconnect and Reconnect reach the subscribers in order, on a background task and only when the state changes:
-        /// the fill poll reports them, and a subscriber such as an algorithm placing an order on reconnection waits for the next poll.
+        /// the fill poll of a brokerage that tracks orders reports them, and a subscriber such as an algorithm placing an order on reconnection waits for the next poll.
         /// Those not yet delivered are dropped on disposal</remarks>
         protected override void OnMessage(BrokerageMessageEvent e)
         {
@@ -1293,7 +1293,8 @@ Interval	Data Available (Open)	Data Available (All)
 
             try
             {
-                if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders, BrokerageMessageType.Disconnect))
+                if (!TryGetIntradayAndPendingOrders(out var intradayAndPendingOrders,
+                    _orderProvider == null ? BrokerageMessageType.Error : BrokerageMessageType.Disconnect))
                 {
                     return;
                 }
