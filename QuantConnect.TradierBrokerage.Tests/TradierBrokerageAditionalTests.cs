@@ -535,43 +535,6 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             Assert.IsFalse(reconnected.Wait(TimeSpan.FromSeconds(1)));
         }
 
-        // Several executions between two polls, such as during an outage, are reported at their average price
-        [TestCase(0, 0, 10, 110, 110, 10, 110)]
-        [TestCase(0, 0, 10, 105, 110, 5, 105)]
-        [TestCase(4, 100, 10, 105, 110, 2, 650 / 6.0)]
-        [TestCase(4, 100, 10, 0, 110, 2, 110)]
-        [TestCase(4, 0, 10, 105, 110, 2, 110)]
-        [TestCase(3001, 0.03001, 3003, 0.02999, 0.01, 1, 0.01)]
-        public void ReportsTheAveragePriceOfTheExecutionsSinceTheLastPoll(decimal cachedQuantityExecuted, decimal cachedAveragePrice,
-            decimal quantityExecuted, decimal averagePrice, decimal lastFillPrice, decimal lastFillQuantity, double expectedFillPrice)
-        {
-            var updatedOrder = CreateBrokerageSideOrder(TradierOrderStatus.Filled, quantityExecuted);
-            updatedOrder.AverageFillPrice = averagePrice;
-            updatedOrder.LastFillPrice = lastFillPrice;
-            updatedOrder.LastFillQuantity = lastFillQuantity;
-            var restClient = new Mock<IRestClient>();
-            restClient.Setup(x => x.Execute(It.IsAny<IRestRequest>())).Returns(() => CreateResponse(SerializeOrders(updatedOrder)));
-
-            var orderProvider = new OrderProvider();
-            var order = new MarketOrder(Symbols.SPY, 10m, DateTime.UtcNow);
-            order.BrokerId.Add(BrokerageSideOrderId.ToStringInvariant());
-            orderProvider.Add(order);
-            var brokerage = CreateBrokerageWithOrderTracking(orderProvider, restClient.Object);
-            var cachedOrder = CreateBrokerageSideOrder(cachedQuantityExecuted > 0 ? TradierOrderStatus.PartiallyFilled : TradierOrderStatus.Open, cachedQuantityExecuted);
-            cachedOrder.AverageFillPrice = cachedAveragePrice;
-            InvokePrivate(brokerage, "UpdateCachedOpenOrder", BrokerageSideOrderId, cachedOrder);
-
-            List<OrderEvent> orderEvents = [];
-            brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
-
-            InvokeCheckForFills(brokerage);
-
-            var fill = orderEvents.Single();
-            Assert.AreEqual(OrderStatus.Filled, fill.Status);
-            Assert.AreEqual(quantityExecuted - cachedQuantityExecuted, fill.FillQuantity);
-            Assert.AreEqual(expectedFillPrice, (double)fill.FillPrice, 1e-9);
-        }
-
         // Only the fill poll, which runs one at a time, reports the connection state. A background read of the orders that
         // failed while the poll succeeded used to report a disconnection after the poll's reconnection, which Lean then
         // waited on until it stopped the algorithm, although Tradier was available
@@ -728,17 +691,14 @@ namespace QuantConnect.Tests.Brokerages.Tradier
             brokerage.OrdersStatusChanged += (_, events) => orderEvents.AddRange(events);
             brokerage.NewBrokerageOrderNotification += (_, e) => orderProvider.Add(e.Order);
 
-            var brokerageSideOrder = CreateBrokerageSideOrder(status, quantityExecuted: 4m);
-            brokerageSideOrder.AverageFillPrice = 105m;
-            brokerageSideOrder.LastFillPrice = 110m;
-            brokerageSideOrder.LastFillQuantity = 2m;
-            Assert.AreEqual(BrokerageSideOrderResult.Tracked, InvokeHandleBrokerageSideOrder(brokerage, brokerageSideOrder));
+            Assert.AreEqual(BrokerageSideOrderResult.Tracked,
+                InvokeHandleBrokerageSideOrder(brokerage, CreateBrokerageSideOrder(status, quantityExecuted: 4m)));
 
             Assert.AreEqual(3, orderEvents.Count);
             Assert.AreEqual(OrderStatus.Submitted, orderEvents[0].Status);
             Assert.AreEqual(OrderStatus.PartiallyFilled, orderEvents[1].Status);
             Assert.AreEqual(4m, orderEvents[1].FillQuantity);
-            Assert.AreEqual(105m, orderEvents[1].FillPrice);
+            Assert.AreEqual(123.45m, orderEvents[1].FillPrice);
             Assert.AreEqual(expectedFinalStatus, orderEvents[2].Status);
             Assert.AreEqual(0m, orderEvents[2].FillQuantity);
             Assert.IsFalse(GetCachedOpenOrders(brokerage).Contains(BrokerageSideOrderId));

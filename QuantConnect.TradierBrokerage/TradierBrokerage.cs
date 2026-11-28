@@ -1580,9 +1580,7 @@ Interval	Data Available (Open)	Data Available (All)
                     Status = TradierOrderStatus.PartiallyFilled,
                     QuantityExecuted = brokerageSideOrder.QuantityExecuted,
                     RemainingQuantity = brokerageSideOrder.RemainingQuantity,
-                    LastFillPrice = brokerageSideOrder.LastFillPrice,
-                    LastFillQuantity = brokerageSideOrder.LastFillQuantity,
-                    AverageFillPrice = brokerageSideOrder.AverageFillPrice
+                    LastFillPrice = brokerageSideOrder.LastFillPrice
                 };
                 ProcessPotentiallyUpdatedOrder(cachedOrder, partiallyFilledOrder);
                 cachedOrder.Order = partiallyFilledOrder;
@@ -1614,25 +1612,16 @@ Interval	Data Available (Open)	Data Available (All)
                     throw new Exception($"Lean order not found for brokerage id: {updatedOrder.Id}");
                 }
 
-                var fillQuantity = updatedOrder.QuantityExecuted - cachedOrder.Order.QuantityExecuted;
-                var fillPrice = updatedOrder.LastFillPrice;
-                if (fillQuantity > updatedOrder.LastFillQuantity && updatedOrder.AverageFillPrice > 0
-                    && (cachedOrder.Order.QuantityExecuted == 0 || cachedOrder.Order.AverageFillPrice > 0))
-                {
-                    var executedValue = updatedOrder.AverageFillPrice * updatedOrder.QuantityExecuted
-                        - cachedOrder.Order.AverageFillPrice * cachedOrder.Order.QuantityExecuted;
-                    if (executedValue > updatedOrder.LastFillPrice * updatedOrder.LastFillQuantity)
-                    {
-                        fillPrice = executedValue / fillQuantity;
-                    }
-                }
-
                 var orderFee = OrderFee.Zero;
                 var fill = new OrderEvent(qcOrder, DateTime.UtcNow, orderFee, "Tradier Fill Event")
                 {
                     Status = leanOrderStatus,
-                    FillPrice = fillPrice,
-                    FillQuantity = (int)fillQuantity
+                    // this is guaranteed to be wrong in the event we have multiple fills within our polling interval,
+                    // we're able to partially cope with the fill quantity by diffing the previous info vs current info
+                    // but the fill price will always be the most recent fill, so if we have two fills with 1/10 of a second
+                    // we'll get the latter fill price, so for large orders this can lead to inconsistent state
+                    FillPrice = updatedOrder.LastFillPrice,
+                    FillQuantity = (int)(updatedOrder.QuantityExecuted - cachedOrder.Order.QuantityExecuted)
                 };
 
                 if (!string.IsNullOrEmpty(updatedOrder.ReasonDescription))
